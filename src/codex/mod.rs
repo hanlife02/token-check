@@ -177,6 +177,8 @@ fn codex_usage(value: &Value) -> Usage {
         input,
         cached_input,
         cache_creation_input: 0,
+        cache_creation_input_5m: 0,
+        cache_creation_input_1h: 0,
         output,
         reasoning_output,
         total: if total > 0 { total } else { input + output },

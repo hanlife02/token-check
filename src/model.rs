@@ -21,6 +21,8 @@ pub struct Usage {
     pub input: u64,
     pub cached_input: u64,
     pub cache_creation_input: u64,
+    pub cache_creation_input_5m: u64,
+    pub cache_creation_input_1h: u64,
     pub output: u64,
     pub reasoning_output: u64,
     pub total: u64,
@@ -31,6 +33,8 @@ impl Usage {
         self.input += other.input;
         self.cached_input += other.cached_input;
         self.cache_creation_input += other.cache_creation_input;
+        self.cache_creation_input_5m += other.cache_creation_input_5m;
+        self.cache_creation_input_1h += other.cache_creation_input_1h;
         self.output += other.output;
         self.reasoning_output += other.reasoning_output;
         self.total += other.total;
@@ -116,6 +120,8 @@ mod tests {
             input: 10,
             cached_input: 20,
             cache_creation_input: 30,
+            cache_creation_input_5m: 0,
+            cache_creation_input_1h: 0,
             output: 40,
             reasoning_output: 50,
             total: 70,
@@ -130,6 +136,8 @@ mod tests {
             input: 10,
             cached_input: 20,
             cache_creation_input: 30,
+            cache_creation_input_5m: 0,
+            cache_creation_input_1h: 0,
             output: 40,
             reasoning_output: 50,
             total: 0,

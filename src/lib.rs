@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
+pub mod billing;
 pub mod claude_code;
 pub mod codex;
 pub mod model;
 
-use crate::model::{ReportData, Roots, Source, Usage, UsageMap};
+use crate::model::{ReportData, Roots, Source, Usage};
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,15 @@ enum Command {
     Tools,
 }
 
+impl Command {
+    fn shows_cost(&self) -> bool {
+        matches!(
+            self,
+            Command::Summary | Command::Days | Command::Projects | Command::Models
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum SourceFilter {
     All,
@@ -50,8 +60,10 @@ pub fn run() -> Result<()> {
         home: cli.home.unwrap_or(home_dir()?),
     };
     let data = collect_data(cli.source, &roots)?;
+    let command = cli.command.unwrap_or(Command::Summary);
+    let shows_cost = command.shows_cost();
 
-    match cli.command.unwrap_or(Command::Summary) {
+    match command {
         Command::Summary => print_summary(&data),
         Command::Days => print_days(&data, cli.limit),
         Command::Projects => print_projects(&data, cli.limit),
@@ -59,9 +71,13 @@ pub fn run() -> Result<()> {
         Command::Tools => print_tools(&data, cli.limit),
     }
 
-    if !data.warnings.is_empty() {
+    let mut warnings = data.warnings.clone();
+    if shows_cost {
+        warnings.extend(billing::unpriced_model_warnings(data.usage_events.iter()));
+    }
+    if !warnings.is_empty() {
         eprintln!("\nWarnings:");
-        for warning in &data.warnings {
+        for warning in &warnings {
             eprintln!("- {warning}");
         }
     }
@@ -98,7 +114,7 @@ fn print_summary(data: &ReportData) {
         if session_count == 0 && usage_events == 0 && tool_calls == 0 {
             continue;
         }
-        let usage = sum_usage(
+        let stats = sum_usage_stats(
             data.usage_events
                 .iter()
                 .filter(|event| event.source == source),
@@ -108,16 +124,17 @@ fn print_summary(data: &ReportData) {
             session_count.to_string(),
             usage_events.to_string(),
             tool_calls.to_string(),
-            format_number(usage.input),
-            format_number(usage.cached_input),
-            format_number(usage.cache_creation_input),
-            format_number(usage.output),
-            format_number(usage.reasoning_output),
-            format_number(usage.computed_total()),
+            format_number(stats.usage.input),
+            format_number(stats.usage.cached_input),
+            format_number(stats.usage.cache_creation_input),
+            format_number(stats.usage.output),
+            format_number(stats.usage.reasoning_output),
+            format_number(stats.usage.computed_total()),
+            format_cost(stats.cost),
         ]);
     }
 
-    let total_usage = sum_usage(data.usage_events.iter());
+    let total_stats = sum_usage_stats(data.usage_events.iter());
     let sessions_with_usage = data
         .usage_events
         .iter()
@@ -147,8 +164,9 @@ fn print_summary(data: &ReportData) {
     println!("tool calls: {}", data.tool_events.len());
     println!(
         "total tokens: {}",
-        format_number(total_usage.computed_total())
+        format_number(total_stats.usage.computed_total())
     );
+    println!("estimated cost: {}", format_cost(total_stats.cost));
     println!();
     print_table(
         &[
@@ -162,19 +180,20 @@ fn print_summary(data: &ReportData) {
             "output",
             "reasoning",
             "total",
+            "cost",
         ],
         &rows,
     );
 }
 
 fn print_days(data: &ReportData, limit: usize) {
-    let mut usage_by_date: UsageMap<String> = BTreeMap::new();
+    let mut usage_by_date: BTreeMap<String, UsageStats> = BTreeMap::new();
     let mut sessions_by_date: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for event in &data.usage_events {
         usage_by_date
             .entry(event.date.clone())
             .or_default()
-            .add_assign(&event.usage);
+            .add(event);
     }
     for session in &data.sessions {
         sessions_by_date
@@ -187,7 +206,7 @@ fn print_days(data: &ReportData, limit: usize) {
         .into_iter()
         .rev()
         .take(limit)
-        .map(|(date, usage)| {
+        .map(|(date, stats)| {
             vec![
                 date.clone(),
                 sessions_by_date
@@ -195,12 +214,13 @@ fn print_days(data: &ReportData, limit: usize) {
                     .map(BTreeSet::len)
                     .unwrap_or(0)
                     .to_string(),
-                format_number(usage.input),
-                format_number(usage.cached_input),
-                format_number(usage.cache_creation_input),
-                format_number(usage.output),
-                format_number(usage.reasoning_output),
-                format_number(usage.computed_total()),
+                format_number(stats.usage.input),
+                format_number(stats.usage.cached_input),
+                format_number(stats.usage.cache_creation_input),
+                format_number(stats.usage.output),
+                format_number(stats.usage.reasoning_output),
+                format_number(stats.usage.computed_total()),
+                format_cost(stats.cost),
             ]
         })
         .collect::<Vec<_>>();
@@ -215,6 +235,7 @@ fn print_days(data: &ReportData, limit: usize) {
             "output",
             "reasoning",
             "total",
+            "cost",
         ],
         &rows,
     );
@@ -227,16 +248,17 @@ fn print_projects(data: &ReportData, limit: usize) {
         limit,
     )
     .into_iter()
-    .map(|((source, project), usage)| {
+    .map(|((source, project), stats)| {
         vec![
             source,
             project,
-            format_number(usage.input),
-            format_number(usage.cached_input),
-            format_number(usage.cache_creation_input),
-            format_number(usage.output),
-            format_number(usage.reasoning_output),
-            format_number(usage.computed_total()),
+            format_number(stats.usage.input),
+            format_number(stats.usage.cached_input),
+            format_number(stats.usage.cache_creation_input),
+            format_number(stats.usage.output),
+            format_number(stats.usage.reasoning_output),
+            format_number(stats.usage.computed_total()),
+            format_cost(stats.cost),
         ]
     })
     .collect::<Vec<_>>();
@@ -251,6 +273,7 @@ fn print_projects(data: &ReportData, limit: usize) {
             "output",
             "reasoning",
             "total",
+            "cost",
         ],
         &rows,
     );
@@ -263,16 +286,17 @@ fn print_models(data: &ReportData, limit: usize) {
         limit,
     )
     .into_iter()
-    .map(|((source, model), usage)| {
+    .map(|((source, model), stats)| {
         vec![
             source,
             model,
-            format_number(usage.input),
-            format_number(usage.cached_input),
-            format_number(usage.cache_creation_input),
-            format_number(usage.output),
-            format_number(usage.reasoning_output),
-            format_number(usage.computed_total()),
+            format_number(stats.usage.input),
+            format_number(stats.usage.cached_input),
+            format_number(stats.usage.cache_creation_input),
+            format_number(stats.usage.output),
+            format_number(stats.usage.reasoning_output),
+            format_number(stats.usage.computed_total()),
+            format_cost(stats.cost),
         ]
     })
     .collect::<Vec<_>>();
@@ -287,6 +311,7 @@ fn print_models(data: &ReportData, limit: usize) {
             "output",
             "reasoning",
             "total",
+            "cost",
         ],
         &rows,
     );
@@ -329,33 +354,45 @@ fn print_tools(data: &ReportData, limit: usize) {
     print_table(&["source", "tool", "calls", "days", "projects"], &rows);
 }
 
-fn aggregate_usage<K, F>(data: &ReportData, key_fn: F, limit: usize) -> Vec<(K, Usage)>
+fn aggregate_usage<K, F>(data: &ReportData, key_fn: F, limit: usize) -> Vec<(K, UsageStats)>
 where
     K: Ord + Clone,
     F: Fn(&crate::model::UsageEvent) -> K,
 {
-    let mut map: UsageMap<K> = BTreeMap::new();
+    let mut map: BTreeMap<K, UsageStats> = BTreeMap::new();
     for event in &data.usage_events {
-        map.entry(key_fn(event))
-            .or_default()
-            .add_assign(&event.usage);
+        map.entry(key_fn(event)).or_default().add(event);
     }
     let mut rows = map.into_iter().collect::<Vec<_>>();
     rows.sort_by(|a, b| {
-        b.1.computed_total()
-            .cmp(&a.1.computed_total())
+        b.1.usage
+            .computed_total()
+            .cmp(&a.1.usage.computed_total())
             .then_with(|| a.0.cmp(&b.0))
     });
     rows.truncate(limit);
     rows
 }
 
-fn sum_usage<'a>(events: impl Iterator<Item = &'a crate::model::UsageEvent>) -> Usage {
-    let mut usage = Usage::default();
-    for event in events {
-        usage.add_assign(&event.usage);
+#[derive(Clone, Debug, Default)]
+struct UsageStats {
+    usage: Usage,
+    cost: billing::Cost,
+}
+
+impl UsageStats {
+    fn add(&mut self, event: &crate::model::UsageEvent) {
+        self.usage.add_assign(&event.usage);
+        self.cost.add_assign(billing::event_cost(event));
     }
-    usage
+}
+
+fn sum_usage_stats<'a>(events: impl Iterator<Item = &'a crate::model::UsageEvent>) -> UsageStats {
+    let mut stats = UsageStats::default();
+    for event in events {
+        stats.add(event);
+    }
+    stats
 }
 
 fn unique_sessions(data: &ReportData, source: Option<Source>) -> usize {
@@ -430,6 +467,33 @@ fn format_scaled_number(value: u64, divisor: u64, suffix: &str) -> String {
     format!("{out}{suffix}")
 }
 
+fn format_cost(cost: billing::Cost) -> String {
+    let mut out = format_dollars(cost.usd);
+    if cost.unpriced_events > 0 {
+        out.push('*');
+    }
+    out
+}
+
+fn format_dollars(value: f64) -> String {
+    let cents = (value * 100.0).round() as u64;
+    let dollars = cents / 100;
+    let cents = cents % 100;
+    format!("${}.{:02}", format_integer_with_commas(dollars), cents)
+}
+
+fn format_integer_with_commas(value: u64) -> String {
+    let raw = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in raw.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
 fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -438,7 +502,8 @@ fn home_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_number;
+    use super::{format_cost, format_dollars, format_number};
+    use crate::billing::Cost;
 
     #[test]
     fn formats_numbers_with_compact_units() {
@@ -450,5 +515,24 @@ mod tests {
         assert_eq!(format_number(999_500), "1M");
         assert_eq!(format_number(12_697_984), "12.7M");
         assert_eq!(format_number(1_550_406_823), "1550M");
+    }
+
+    #[test]
+    fn formats_costs_in_dollars() {
+        assert_eq!(format_dollars(0.0), "$0.00");
+        assert_eq!(format_dollars(12.345), "$12.35");
+        assert_eq!(format_dollars(1_234.5), "$1,234.50");
+    }
+
+    #[test]
+    fn marks_partial_costs() {
+        assert_eq!(
+            format_cost(Cost {
+                usd: 1.23,
+                unpriced_events: 1,
+                unpriced_tokens: 999,
+            }),
+            "$1.23*"
+        );
     }
 }

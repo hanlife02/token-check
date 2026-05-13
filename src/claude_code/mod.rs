@@ -172,15 +172,18 @@ fn collect_file(path: &Path) -> Result<ReportData> {
 fn claude_usage(value: &Value) -> Usage {
     let input = get_u64(value, "input_tokens");
     let cached_input = get_u64(value, "cache_read_input_tokens");
-    let cache_creation_input = get_u64(value, "cache_creation_input_tokens")
-        + get_u64(value, "claude_cache_creation_1_h_tokens")
+    let cache_creation_input_5m = get_u64(value, "cache_creation_input_tokens")
         + get_u64(value, "claude_cache_creation_5_m_tokens");
+    let cache_creation_input_1h = get_u64(value, "claude_cache_creation_1_h_tokens");
+    let cache_creation_input = cache_creation_input_5m + cache_creation_input_1h;
     let output = get_u64(value, "output_tokens");
 
     Usage {
         input,
         cached_input,
         cache_creation_input,
+        cache_creation_input_5m,
+        cache_creation_input_1h,
         output,
         reasoning_output: 0,
         total: input + cached_input + cache_creation_input + output,
@@ -273,6 +276,8 @@ mod tests {
         assert_eq!(usage.input, 10);
         assert_eq!(usage.cached_input, 20);
         assert_eq!(usage.cache_creation_input, 120);
+        assert_eq!(usage.cache_creation_input_5m, 80);
+        assert_eq!(usage.cache_creation_input_1h, 40);
         assert_eq!(usage.output, 60);
         assert_eq!(usage.computed_total(), 210);
     }
