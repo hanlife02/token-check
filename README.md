@@ -50,7 +50,7 @@ tkc summary
 tkc fetch
 ```
 
-使用 JSON 快照查看总览：
+如果当前目录存在 `data/tokencheck.json`，报表命令会自动把 JSON 快照和当前本机扫描结果合并后展示。只使用 JSON 快照查看总览：
 
 ```bash
 tkc summary --from-json
@@ -204,7 +204,7 @@ tkc summary --home /Users/yourname
 
 ### `--from-json`
 
-让报表命令从 JSON 快照读取数据，而不是扫描当前 `$HOME`。
+让报表命令只从 JSON 快照读取数据，而不是同时合并当前 `$HOME` 扫描结果。
 
 ```bash
 tkc summary --from-json

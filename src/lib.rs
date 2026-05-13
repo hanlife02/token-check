@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_DATA_FILE: &str = "data/tokencheck.json";
 
@@ -71,14 +71,7 @@ pub fn run() -> Result<()> {
         return run_fetch(cli.source, cli.home, cli.data_file);
     }
 
-    let data = if cli.from_json {
-        filter_data(snapshot::load(&cli.data_file)?, cli.source)
-    } else {
-        let roots = Roots {
-            home: cli.home.unwrap_or(home_dir()?),
-        };
-        collect_data(cli.source, &roots)?
-    };
+    let data = report_data(cli.source, cli.home, &cli.data_file, cli.from_json)?;
     let shows_cost = command.shows_cost();
 
     match command {
@@ -113,6 +106,31 @@ fn collect_data(filter: SourceFilter, roots: &Roots) -> Result<ReportData> {
         data.merge(codex::collect(&roots.codex_sessions())?);
     }
     Ok(data)
+}
+
+fn report_data(
+    filter: SourceFilter,
+    home: Option<PathBuf>,
+    data_file: &Path,
+    from_json: bool,
+) -> Result<ReportData> {
+    if from_json {
+        return Ok(filter_data(snapshot::load(data_file)?, filter));
+    }
+
+    let roots = Roots {
+        home: home.unwrap_or(home_dir()?),
+    };
+    let live = collect_data(filter, &roots)?;
+    if !data_file.exists() {
+        return Ok(live);
+    }
+
+    let warnings = live.warnings.clone();
+    let mut data = snapshot::load(data_file)?;
+    snapshot::merge_preserving_growth(&mut data, live);
+    data.warnings = warnings;
+    Ok(filter_data(data, filter))
 }
 
 fn run_fetch(filter: SourceFilter, home: Option<PathBuf>, data_file: PathBuf) -> Result<()> {
