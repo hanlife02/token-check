@@ -8,6 +8,7 @@
 
 - 统计 Claude Code 和 Codex 的总使用量。
 - 按日期查看 token 趋势。
+- 按日期使用量生成终端热力图。
 - 按项目路径查看使用排行。
 - 按模型查看 token 分布。
 - 按模型价格估算每日、项目、模型和总美元成本。
@@ -60,6 +61,12 @@ tkc summary --from-json
 
 ```bash
 tkc days --limit 10
+```
+
+查看最近 12 个月的使用热力图：
+
+```bash
+tkc heatmap
 ```
 
 查看项目使用排行：
@@ -136,6 +143,16 @@ JSON 中的 `tool_events` 只表示工具调用次数和来源；token 用量、
 ```bash
 tkc days
 tkc days --limit 30
+```
+
+### `heatmap`
+
+按日聚合 total tokens，并输出类似 GitHub contributions 的周历热力图。横向是周，纵向是星期，绿色色块越深表示当天使用量越高。
+
+```bash
+tkc heatmap
+tkc heatmap --months 6
+tkc heatmap --source codex
 ```
 
 ### `projects`

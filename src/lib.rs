@@ -43,6 +43,10 @@ enum Command {
     Fetch,
     Summary,
     Days,
+    Heatmap {
+        #[arg(long, default_value_t = 12)]
+        months: usize,
+    },
     Projects,
     Models,
     Tools,
@@ -78,6 +82,7 @@ pub fn run() -> Result<()> {
         Command::Fetch => unreachable!("fetch returns before report rendering"),
         Command::Summary => print_summary(&data),
         Command::Days => print_days(&data, cli.limit),
+        Command::Heatmap { months } => print_heatmap(&data, months),
         Command::Projects => print_projects(&data, cli.limit),
         Command::Models => print_models(&data, cli.limit),
         Command::Tools => print_tools(&data, cli.limit),
@@ -369,6 +374,117 @@ fn print_days(data: &ReportData, limit: usize) {
     );
 }
 
+fn print_heatmap(data: &ReportData, months: usize) {
+    let mut usage_by_date: BTreeMap<CivilDate, UsageStats> = BTreeMap::new();
+    for event in &data.usage_events {
+        let Some(date) = CivilDate::parse(&event.date) else {
+            continue;
+        };
+        usage_by_date.entry(date).or_default().add(event);
+    }
+
+    let Some(latest_date) = usage_by_date.keys().next_back().copied() else {
+        println!("No usage data.");
+        return;
+    };
+
+    let months = months.max(1).min(i32::MAX as usize) as i32;
+    let latest_month = latest_date.month_index();
+    let start_month = latest_month.saturating_sub(months - 1);
+    let (start_year, start_month_number) = CivilDate::from_month_index(start_month);
+    let (end_year, end_month_number) = CivilDate::from_month_index(latest_month);
+    let start_date = CivilDate {
+        year: start_year,
+        month: start_month_number,
+        day: 1,
+    };
+    let end_date = CivilDate {
+        year: end_year,
+        month: end_month_number,
+        day: days_in_month(end_year, end_month_number),
+    };
+    let selected_max = usage_by_date
+        .iter()
+        .filter(|(date, _)| **date >= start_date && **date <= end_date)
+        .map(|(_, stats)| stats.usage.computed_total())
+        .max()
+        .unwrap_or(0);
+    let first_grid_date = start_date.add_days(-(start_date.weekday_sunday_index() as i64));
+    let last_grid_date = end_date.add_days((6 - end_date.weekday_sunday_index()) as i64);
+    let week_count =
+        ((last_grid_date.days_since_epoch() - first_grid_date.days_since_epoch()) / 7 + 1) as usize;
+
+    println!("usage heatmap (daily total tokens)");
+    println!("max day: {}", format_number(selected_max));
+    print_github_month_labels(first_grid_date, week_count, start_month, latest_month);
+    print_github_heatmap_grid(
+        first_grid_date,
+        week_count,
+        start_date,
+        end_date,
+        selected_max,
+        &usage_by_date,
+    );
+    print_github_heatmap_legend();
+}
+
+fn print_github_month_labels(
+    first_grid_date: CivilDate,
+    week_count: usize,
+    start_month: i32,
+    latest_month: i32,
+) {
+    let mut labels = vec![String::from("   "); week_count];
+    for month_index in start_month..=latest_month {
+        let (year, month) = CivilDate::from_month_index(month_index);
+        let first_of_month = CivilDate {
+            year,
+            month,
+            day: 1,
+        };
+        let week_index =
+            ((first_of_month.days_since_epoch() - first_grid_date.days_since_epoch()) / 7) as usize;
+        if week_index < labels.len() {
+            labels[week_index] = month_abbr(month).to_string();
+        }
+    }
+    println!("     {}", labels.join(""));
+}
+
+fn print_github_heatmap_grid(
+    first_grid_date: CivilDate,
+    week_count: usize,
+    start_date: CivilDate,
+    end_date: CivilDate,
+    max_usage: u64,
+    usage_by_date: &BTreeMap<CivilDate, UsageStats>,
+) {
+    for weekday in 0..7 {
+        print!("{:>3}  ", weekday_label(weekday));
+        for week in 0..week_count {
+            let date = first_grid_date.add_days((week * 7 + weekday) as i64);
+            if date < start_date || date > end_date {
+                print!("   ");
+                continue;
+            }
+            let usage = usage_by_date
+                .get(&date)
+                .map(|stats| stats.usage.computed_total())
+                .unwrap_or(0);
+            print!("{} ", heatmap_cell(usage, max_usage));
+        }
+        println!();
+    }
+}
+
+fn print_github_heatmap_legend() {
+    print!("     less ");
+    for level in [0, 5, 10, 15] {
+        print!("{} ", heatmap_cell_for_level(level));
+    }
+    println!("more");
+}
+
 fn print_projects(data: &ReportData, limit: usize) {
     let rows = aggregate_usage(
         data,
@@ -572,6 +688,161 @@ fn display_width(value: &str) -> usize {
     value.chars().count()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct CivilDate {
+    year: i32,
+    month: u8,
+    day: u8,
+}
+
+impl CivilDate {
+    fn parse(value: &str) -> Option<Self> {
+        let year = value.get(0..4)?.parse::<i32>().ok()?;
+        let month = value.get(5..7)?.parse::<u8>().ok()?;
+        let day = value.get(8..10)?.parse::<u8>().ok()?;
+        if value.as_bytes().get(4) != Some(&b'-') || value.as_bytes().get(7) != Some(&b'-') {
+            return None;
+        }
+        if !(1..=12).contains(&month) || !(1..=days_in_month(year, month)).contains(&day) {
+            return None;
+        }
+        Some(Self { year, month, day })
+    }
+
+    fn month_index(self) -> i32 {
+        self.year * 12 + i32::from(self.month) - 1
+    }
+
+    fn from_month_index(index: i32) -> (i32, u8) {
+        let year = index.div_euclid(12);
+        let month = index.rem_euclid(12) + 1;
+        (year, month as u8)
+    }
+
+    fn days_since_epoch(self) -> i64 {
+        days_from_civil(self.year, self.month, self.day)
+    }
+
+    fn add_days(self, days: i64) -> Self {
+        civil_from_days(self.days_since_epoch() + days)
+    }
+
+    fn weekday_sunday_index(self) -> usize {
+        let days = days_from_civil(self.year, self.month, self.day);
+        (days + 4).rem_euclid(7) as usize
+    }
+}
+
+fn heatmap_cell(usage: u64, max_usage: u64) -> String {
+    heatmap_cell_for_level(heatmap_level(usage, max_usage))
+}
+
+fn heatmap_level(usage: u64, max_usage: u64) -> usize {
+    if usage == 0 || max_usage == 0 {
+        return 0;
+    }
+    let index = (((usage as u128) * 15 - 1) / (max_usage as u128)) as usize + 1;
+    index.min(15)
+}
+
+fn heatmap_cell_for_level(level: usize) -> String {
+    let color = match level {
+        0 => 237,
+        1 => 22,
+        2 => 28,
+        3 => 34,
+        4 => 40,
+        5 => 46,
+        6 => 82,
+        7 => 118,
+        8 => 154,
+        9 => 190,
+        10 => 226,
+        11 => 220,
+        12 => 214,
+        13 => 208,
+        14 => 202,
+        _ => 196,
+    };
+    format!("\x1b[48;5;{color}m  \x1b[0m")
+}
+
+fn month_abbr(month: u8) -> &'static str {
+    match month {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => "   ",
+    }
+}
+
+fn weekday_label(weekday: usize) -> &'static str {
+    match weekday {
+        0 => "Sun",
+        1 => "Mon",
+        2 => "Tue",
+        3 => "Wed",
+        4 => "Thu",
+        5 => "Fri",
+        6 => "Sat",
+        _ => "",
+    }
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> CivilDate {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    CivilDate {
+        year: year as i32,
+        month: month as u8,
+        day: day as u8,
+    }
+}
+
 fn format_number(value: u64) -> String {
     if value < 1_000 {
         return value.to_string();
@@ -630,7 +901,7 @@ fn home_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_cost, format_dollars, format_number};
+    use super::{format_cost, format_dollars, format_number, heatmap_level, CivilDate};
     use crate::billing::Cost;
 
     #[test]
@@ -662,5 +933,76 @@ mod tests {
             }),
             "$1.23*"
         );
+    }
+
+    #[test]
+    fn parses_valid_calendar_dates() {
+        assert_eq!(
+            CivilDate::parse("2026-05-13"),
+            Some(CivilDate {
+                year: 2026,
+                month: 5,
+                day: 13
+            })
+        );
+        assert_eq!(CivilDate::parse("2026-02-29"), None);
+        assert_eq!(
+            CivilDate::parse("2024-02-29"),
+            Some(CivilDate {
+                year: 2024,
+                month: 2,
+                day: 29
+            })
+        );
+    }
+
+    #[test]
+    fn maps_weekday_with_sunday_origin() {
+        assert_eq!(
+            CivilDate::parse("2026-05-10")
+                .unwrap()
+                .weekday_sunday_index(),
+            0
+        );
+        assert_eq!(
+            CivilDate::parse("2026-05-13")
+                .unwrap()
+                .weekday_sunday_index(),
+            3
+        );
+        assert_eq!(
+            CivilDate::parse("2026-05-16")
+                .unwrap()
+                .weekday_sunday_index(),
+            6
+        );
+    }
+
+    #[test]
+    fn adds_days_across_month_boundaries() {
+        assert_eq!(
+            CivilDate::parse("2026-03-01").unwrap().add_days(-1),
+            CivilDate {
+                year: 2026,
+                month: 2,
+                day: 28
+            }
+        );
+        assert_eq!(
+            CivilDate::parse("2024-02-28").unwrap().add_days(1),
+            CivilDate {
+                year: 2024,
+                month: 2,
+                day: 29
+            }
+        );
+    }
+
+    #[test]
+    fn maps_usage_to_heatmap_levels() {
+        assert_eq!(heatmap_level(0, 100), 0);
+        assert_eq!(heatmap_level(1, 100), 1);
+        assert_eq!(heatmap_level(50, 100), 8);
+        assert_eq!(heatmap_level(100, 100), 15);
     }
 }
