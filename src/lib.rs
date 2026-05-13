@@ -408,15 +408,26 @@ fn display_width(value: &str) -> usize {
 }
 
 fn format_number(value: u64) -> String {
-    let raw = value.to_string();
-    let mut out = String::new();
-    for (index, ch) in raw.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
+    if value < 1_000 {
+        return value.to_string();
     }
-    out.chars().rev().collect()
+    if value < 999_500 {
+        return format_scaled_number(value, 1_000, "k");
+    }
+    format_scaled_number(value, 1_000_000, "M")
+}
+
+fn format_scaled_number(value: u64, divisor: u64, suffix: &str) -> String {
+    let scaled = value as f64 / divisor as f64;
+    let mut out = if scaled < 100.0 {
+        format!("{scaled:.1}")
+    } else {
+        format!("{scaled:.0}")
+    };
+    if out.ends_with(".0") {
+        out.truncate(out.len() - 2);
+    }
+    format!("{out}{suffix}")
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -430,10 +441,14 @@ mod tests {
     use super::format_number;
 
     #[test]
-    fn formats_numbers_with_group_separators() {
+    fn formats_numbers_with_compact_units() {
         assert_eq!(format_number(0), "0");
         assert_eq!(format_number(999), "999");
-        assert_eq!(format_number(1_000), "1,000");
-        assert_eq!(format_number(1_234_567_890), "1,234,567,890");
+        assert_eq!(format_number(1_000), "1k");
+        assert_eq!(format_number(12_345), "12.3k");
+        assert_eq!(format_number(292_631), "293k");
+        assert_eq!(format_number(999_500), "1M");
+        assert_eq!(format_number(12_697_984), "12.7M");
+        assert_eq!(format_number(1_550_406_823), "1550M");
     }
 }
