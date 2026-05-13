@@ -14,6 +14,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_DATA_FILE: &str = "data/tokencheck.json";
+const HISTOGRAM_COLUMN_WIDTH: usize = 7;
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -42,7 +43,10 @@ struct Cli {
 enum Command {
     Fetch,
     Summary,
-    Days,
+    Days {
+        #[arg(long)]
+        chant: bool,
+    },
     Heatmap {
         #[arg(long, default_value_t = 12)]
         months: usize,
@@ -56,7 +60,7 @@ impl Command {
     fn shows_cost(&self) -> bool {
         matches!(
             self,
-            Command::Summary | Command::Days | Command::Projects | Command::Models
+            Command::Summary | Command::Days { .. } | Command::Projects | Command::Models
         )
     }
 }
@@ -81,7 +85,7 @@ pub fn run() -> Result<()> {
     match command {
         Command::Fetch => unreachable!("fetch returns before report rendering"),
         Command::Summary => print_summary(&data),
-        Command::Days => print_days(&data, cli.limit),
+        Command::Days { chant } => print_days(&data, cli.limit, chant),
         Command::Heatmap { months } => print_heatmap(&data, months),
         Command::Projects => print_projects(&data, cli.limit),
         Command::Models => print_models(&data, cli.limit),
@@ -319,41 +323,26 @@ fn print_summary(data: &ReportData) {
     );
 }
 
-fn print_days(data: &ReportData, limit: usize) {
-    let mut usage_by_date: BTreeMap<String, UsageStats> = BTreeMap::new();
-    let mut sessions_by_date: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for event in &data.usage_events {
-        usage_by_date
-            .entry(event.date.clone())
-            .or_default()
-            .add(event);
-    }
-    for session in &data.sessions {
-        sessions_by_date
-            .entry(session.date.clone())
-            .or_default()
-            .insert(format!("{}:{}", session.source.label(), session.session_id));
+fn print_days(data: &ReportData, limit: usize, chant: bool) {
+    let rows = daily_usage_rows(data, limit);
+    if chant {
+        print_days_histogram(&rows);
+        return;
     }
 
-    let rows = usage_by_date
+    let rows = rows
         .into_iter()
-        .rev()
-        .take(limit)
-        .map(|(date, stats)| {
+        .map(|row| {
             vec![
-                date.clone(),
-                sessions_by_date
-                    .get(&date)
-                    .map(BTreeSet::len)
-                    .unwrap_or(0)
-                    .to_string(),
-                format_number(stats.usage.input),
-                format_number(stats.usage.cached_input),
-                format_number(stats.usage.cache_creation_input),
-                format_number(stats.usage.output),
-                format_number(stats.usage.reasoning_output),
-                format_number(stats.usage.computed_total()),
-                format_cost(stats.cost),
+                row.date,
+                row.sessions.to_string(),
+                format_number(row.stats.usage.input),
+                format_number(row.stats.usage.cached_input),
+                format_number(row.stats.usage.cache_creation_input),
+                format_number(row.stats.usage.output),
+                format_number(row.stats.usage.reasoning_output),
+                format_number(row.stats.usage.computed_total()),
+                format_cost(row.stats.cost),
             ]
         })
         .collect::<Vec<_>>();
@@ -372,6 +361,88 @@ fn print_days(data: &ReportData, limit: usize) {
         ],
         &rows,
     );
+}
+
+fn daily_usage_rows(data: &ReportData, limit: usize) -> Vec<DailyUsageRow> {
+    let mut usage_by_date: BTreeMap<String, UsageStats> = BTreeMap::new();
+    let mut sessions_by_date: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for event in &data.usage_events {
+        usage_by_date
+            .entry(event.date.clone())
+            .or_default()
+            .add(event);
+    }
+    for session in &data.sessions {
+        sessions_by_date
+            .entry(session.date.clone())
+            .or_default()
+            .insert(format!("{}:{}", session.source.label(), session.session_id));
+    }
+
+    usage_by_date
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|(date, stats)| DailyUsageRow {
+            sessions: sessions_by_date.get(&date).map(BTreeSet::len).unwrap_or(0),
+            date,
+            stats,
+        })
+        .collect()
+}
+
+fn print_days_histogram(rows: &[DailyUsageRow]) {
+    let max_usage = rows
+        .iter()
+        .map(|row| row.stats.usage.computed_total())
+        .max()
+        .unwrap_or(0);
+    println!("daily usage histogram");
+    println!("max day: {}", format_number(max_usage));
+    println!();
+
+    if rows.is_empty() {
+        return;
+    }
+    print_vertical_histogram(rows, max_usage, 10);
+}
+
+fn print_vertical_histogram(rows: &[DailyUsageRow], max_usage: u64, height: usize) {
+    let columns = rows
+        .iter()
+        .map(|row| {
+            let total = row.stats.usage.computed_total();
+            HistogramColumn {
+                date: row.date.as_str(),
+                total,
+                cost: row.stats.cost,
+                height: histogram_height(total, max_usage, height),
+                level: heatmap_level(total, max_usage),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for level in (1..=height).rev() {
+        print!("      ");
+        for column in &columns {
+            if column.height >= level {
+                print!("{}   ", heatmap_cell_for_level_width(column.level, 4));
+            } else {
+                print!("{:width$}", "", width = HISTOGRAM_COLUMN_WIDTH);
+            }
+        }
+        println!();
+    }
+    print!("      ");
+    for _ in &columns {
+        print!("{:^width$}", "--", width = HISTOGRAM_COLUMN_WIDTH);
+    }
+    println!();
+    print_histogram_label_row(&columns, |column| {
+        column.date.get(5..10).unwrap_or(column.date).to_string()
+    });
+    print_histogram_label_row(&columns, |column| format_number(column.total));
+    print_histogram_label_row(&columns, |column| format_cost(column.cost));
 }
 
 fn print_heatmap(data: &ReportData, months: usize) {
@@ -624,6 +695,22 @@ struct UsageStats {
     cost: billing::Cost,
 }
 
+#[derive(Clone, Debug)]
+struct DailyUsageRow {
+    date: String,
+    sessions: usize,
+    stats: UsageStats,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HistogramColumn<'a> {
+    date: &'a str,
+    total: u64,
+    cost: billing::Cost,
+    height: usize,
+    level: usize,
+}
+
 impl UsageStats {
     fn add(&mut self, event: &crate::model::UsageEvent) {
         self.usage.add_assign(&event.usage);
@@ -688,6 +775,37 @@ fn display_width(value: &str) -> usize {
     value.chars().count()
 }
 
+fn print_histogram_label_row<'a>(
+    columns: &[HistogramColumn<'a>],
+    label_fn: impl Fn(&HistogramColumn<'a>) -> String,
+) {
+    print!("      ");
+    for column in columns {
+        print!(
+            "{:^width$}",
+            fit_histogram_label(&label_fn(column), HISTOGRAM_COLUMN_WIDTH),
+            width = HISTOGRAM_COLUMN_WIDTH
+        );
+    }
+    println!();
+}
+
+fn fit_histogram_label(value: &str, width: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+    chars.into_iter().take(width).collect()
+}
+
+fn histogram_height(value: u64, max_value: u64, height: usize) -> usize {
+    if value == 0 || max_value == 0 || height == 0 {
+        return 0;
+    }
+    let filled = ((value as u128) * (height as u128)).div_ceil(max_value as u128) as usize;
+    filled.max(1).min(height)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct CivilDate {
     year: i32,
@@ -746,6 +864,10 @@ fn heatmap_level(usage: u64, max_usage: u64) -> usize {
 }
 
 fn heatmap_cell_for_level(level: usize) -> String {
+    heatmap_cell_for_level_width(level, 2)
+}
+
+fn heatmap_cell_for_level_width(level: usize, width: usize) -> String {
     let color = match level {
         0 => 237,
         1 => 22,
@@ -764,7 +886,7 @@ fn heatmap_cell_for_level(level: usize) -> String {
         14 => 202,
         _ => 196,
     };
-    format!("\x1b[48;5;{color}m  \x1b[0m")
+    format!("\x1b[48;5;{color}m{}\x1b[0m", " ".repeat(width))
 }
 
 fn month_abbr(month: u8) -> &'static str {
@@ -901,7 +1023,10 @@ fn home_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_cost, format_dollars, format_number, heatmap_level, CivilDate};
+    use super::{
+        fit_histogram_label, format_cost, format_dollars, format_number, heatmap_level,
+        histogram_height, CivilDate,
+    };
     use crate::billing::Cost;
 
     #[test]
@@ -1004,5 +1129,20 @@ mod tests {
         assert_eq!(heatmap_level(1, 100), 1);
         assert_eq!(heatmap_level(50, 100), 8);
         assert_eq!(heatmap_level(100, 100), 15);
+    }
+
+    #[test]
+    fn scales_histogram_heights() {
+        assert_eq!(histogram_height(0, 100, 10), 0);
+        assert_eq!(histogram_height(1, 100, 10), 1);
+        assert_eq!(histogram_height(50, 100, 10), 5);
+        assert_eq!(histogram_height(100, 100, 10), 10);
+    }
+
+    #[test]
+    fn fits_histogram_labels() {
+        assert_eq!(fit_histogram_label("05-13", 7), "05-13");
+        assert_eq!(fit_histogram_label("$301.30", 7), "$301.30");
+        assert_eq!(fit_histogram_label("$1234.56", 7), "$1234.5");
     }
 }

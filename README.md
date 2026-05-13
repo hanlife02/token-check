@@ -143,7 +143,10 @@ JSON 中的 `tool_events` 只表示工具调用次数和来源；token 用量、
 ```bash
 tkc days
 tkc days --limit 30
+tkc days --chant
 ```
+
+加上 `--chant` 时会用竖直彩色柱状图展示每天的 total tokens。
 
 ### `heatmap`
 
