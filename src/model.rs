@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     Claude,
     Codex,
@@ -16,12 +18,14 @@ impl Source {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub input: u64,
     pub cached_input: u64,
     pub cache_creation_input: u64,
+    #[serde(default)]
     pub cache_creation_input_5m: u64,
+    #[serde(default)]
     pub cache_creation_input_1h: u64,
     pub output: u64,
     pub reasoning_output: u64,
@@ -49,7 +53,7 @@ impl Usage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionMeta {
     pub source: Source,
     pub session_id: String,
@@ -58,9 +62,11 @@ pub struct SessionMeta {
     pub model: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UsageEvent {
     pub source: Source,
+    #[serde(default)]
+    pub event_id: String,
     pub session_id: String,
     pub date: String,
     pub project: String,
@@ -68,19 +74,25 @@ pub struct UsageEvent {
     pub usage: Usage,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolEvent {
     pub source: Source,
+    #[serde(default)]
+    pub event_id: String,
     pub date: String,
     pub project: String,
     pub tool: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ReportData {
+    #[serde(default)]
     pub sessions: Vec<SessionMeta>,
+    #[serde(default)]
     pub usage_events: Vec<UsageEvent>,
+    #[serde(default)]
     pub tool_events: Vec<ToolEvent>,
+    #[serde(default)]
     pub warnings: Vec<String>,
 }
 

@@ -4,6 +4,7 @@ pub mod billing;
 pub mod claude_code;
 pub mod codex;
 pub mod model;
+pub mod snapshot;
 
 use crate::model::{ReportData, Roots, Source, Usage};
 use anyhow::{anyhow, Result};
@@ -11,6 +12,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
+
+const DEFAULT_DATA_FILE: &str = "data/tokencheck.json";
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -27,10 +30,17 @@ struct Cli {
 
     #[arg(long, global = true, default_value_t = 20)]
     limit: usize,
+
+    #[arg(long, global = true)]
+    from_json: bool,
+
+    #[arg(long, global = true, default_value = DEFAULT_DATA_FILE)]
+    data_file: PathBuf,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    Fetch,
     Summary,
     Days,
     Projects,
@@ -56,14 +66,23 @@ enum SourceFilter {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let roots = Roots {
-        home: cli.home.unwrap_or(home_dir()?),
-    };
-    let data = collect_data(cli.source, &roots)?;
     let command = cli.command.unwrap_or(Command::Summary);
+    if matches!(command, Command::Fetch) {
+        return run_fetch(cli.source, cli.home, cli.data_file);
+    }
+
+    let data = if cli.from_json {
+        filter_data(snapshot::load(&cli.data_file)?, cli.source)
+    } else {
+        let roots = Roots {
+            home: cli.home.unwrap_or(home_dir()?),
+        };
+        collect_data(cli.source, &roots)?
+    };
     let shows_cost = command.shows_cost();
 
     match command {
+        Command::Fetch => unreachable!("fetch returns before report rendering"),
         Command::Summary => print_summary(&data),
         Command::Days => print_days(&data, cli.limit),
         Command::Projects => print_projects(&data, cli.limit),
@@ -94,6 +113,97 @@ fn collect_data(filter: SourceFilter, roots: &Roots) -> Result<ReportData> {
         data.merge(codex::collect(&roots.codex_sessions())?);
     }
     Ok(data)
+}
+
+fn run_fetch(filter: SourceFilter, home: Option<PathBuf>, data_file: PathBuf) -> Result<()> {
+    let roots = Roots {
+        home: home.unwrap_or(home_dir()?),
+    };
+    let incoming = collect_data(filter, &roots)?;
+    let warnings = incoming.warnings.clone();
+    let file_exists = data_file.exists();
+    let mut existing = snapshot::load_or_default(&data_file)?;
+    let before = DataCounts::from(&existing);
+    let summary = snapshot::merge_preserving_growth(&mut existing, incoming);
+    let after = DataCounts::from(&existing);
+
+    if summary.changed() || !file_exists {
+        snapshot::save(&data_file, &existing)?;
+        println!("snapshot saved: {}", data_file.display());
+    } else {
+        println!("snapshot unchanged: {}", data_file.display());
+    }
+    println!("sessions: {} -> {}", before.sessions, after.sessions);
+    println!(
+        "usage events: {} -> {} (+{}, upgraded {})",
+        before.usage_events,
+        after.usage_events,
+        summary.usage_events_added,
+        summary.usage_events_upgraded
+    );
+    println!(
+        "tool calls: {} -> {} (+{})",
+        before.tool_events, after.tool_events, summary.tool_events_added
+    );
+    println!(
+        "total tokens: {} -> {}",
+        format_number(before.total_tokens),
+        format_number(after.total_tokens)
+    );
+
+    if !warnings.is_empty() {
+        eprintln!("\nWarnings:");
+        for warning in &warnings {
+            eprintln!("- {warning}");
+        }
+    }
+
+    Ok(())
+}
+
+fn filter_data(mut data: ReportData, filter: SourceFilter) -> ReportData {
+    if matches!(filter, SourceFilter::All) {
+        return data;
+    }
+    data.sessions
+        .retain(|session| source_matches(session.source, filter));
+    data.usage_events
+        .retain(|event| source_matches(event.source, filter));
+    data.tool_events
+        .retain(|event| source_matches(event.source, filter));
+    data
+}
+
+fn source_matches(source: Source, filter: SourceFilter) -> bool {
+    matches!(
+        (source, filter),
+        (_, SourceFilter::All)
+            | (Source::Claude, SourceFilter::Claude)
+            | (Source::Codex, SourceFilter::Codex)
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DataCounts {
+    sessions: usize,
+    usage_events: usize,
+    tool_events: usize,
+    total_tokens: u64,
+}
+
+impl From<&ReportData> for DataCounts {
+    fn from(data: &ReportData) -> Self {
+        Self {
+            sessions: data.sessions.len(),
+            usage_events: data.usage_events.len(),
+            tool_events: data.tool_events.len(),
+            total_tokens: data
+                .usage_events
+                .iter()
+                .map(|event| event.usage.computed_total())
+                .sum(),
+        }
+    }
 }
 
 fn print_summary(data: &ReportData) {

@@ -236,6 +236,7 @@ mod tests {
     fn event(source: Source, model: &str, usage: Usage) -> UsageEvent {
         UsageEvent {
             source,
+            event_id: String::from("event"),
             session_id: String::from("session"),
             date: String::from("2026-05-13"),
             project: String::from("/tmp/project"),

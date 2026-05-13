@@ -96,6 +96,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
             &value,
             &mut tool_ids,
             &mut tool_events,
+            &session_id,
             &session_project,
             line_index,
         );
@@ -139,6 +140,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
         let usage = claude_usage(usage_value);
         let event = UsageEvent {
             source: Source::Claude,
+            event_id: key.clone(),
             session_id: session_id.clone(),
             date,
             project,
@@ -194,6 +196,7 @@ fn collect_tool_events(
     value: &Value,
     tool_ids: &mut HashSet<String>,
     tool_events: &mut Vec<ToolEvent>,
+    session_id: &str,
     project: &str,
     line_index: usize,
 ) {
@@ -218,9 +221,11 @@ fn collect_tool_events(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("line:{line_index}:item:{item_index}"));
-        if tool_ids.insert(id) {
+        let event_id = format!("{session_id}:{id}");
+        if tool_ids.insert(event_id.clone()) {
             tool_events.push(ToolEvent {
                 source: Source::Claude,
+                event_id,
                 date: date.clone(),
                 project: project.to_string(),
                 tool: name.to_string(),

@@ -120,6 +120,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
             }
             Some("response_item") => {
                 if let Some(tool) = tool_name(value.get("payload")) {
+                    let event_id = tool_event_id(&session_id, value.get("payload"), line_index);
                     let event_date = value
                         .get("timestamp")
                         .and_then(Value::as_str)
@@ -127,6 +128,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
                         .unwrap_or_else(|| date.clone());
                     tool_events.push(ToolEvent {
                         source: Source::Codex,
+                        event_id,
                         date: event_date,
                         project: project.clone(),
                         tool,
@@ -154,6 +156,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
     if let Some((usage_date, usage)) = final_usage {
         data.usage_events.push(UsageEvent {
             source: Source::Codex,
+            event_id: session_id.clone(),
             session_id,
             date: usage_date,
             project,
@@ -200,6 +203,15 @@ fn tool_name(payload: Option<&Value>) -> Option<String> {
         "web_search_call" => Some(String::from("web_search")),
         _ => None,
     }
+}
+
+fn tool_event_id(session_id: &str, payload: Option<&Value>, line_index: usize) -> String {
+    let id = payload
+        .and_then(|payload| payload.get("call_id").or_else(|| payload.get("id")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("line:{line_index}"));
+    format!("{session_id}:{id}")
 }
 
 fn get_u64(value: &Value, key: &str) -> u64 {

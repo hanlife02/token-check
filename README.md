@@ -12,6 +12,7 @@
 - 按模型查看 token 分布。
 - 按模型价格估算每日、项目、模型和总美元成本。
 - 按工具名查看调用次数。
+- 将本机扫描结果合并保存为当前目录下的 JSON 快照，避免本机日志缺失时丢失历史统计。
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
 
 ## 安装
@@ -41,6 +42,18 @@ cargo run --bin tkc -- summary
 
 ```bash
 tkc summary
+```
+
+保存或更新当前目录下的 JSON 快照：
+
+```bash
+tkc fetch
+```
+
+使用 JSON 快照查看总览：
+
+```bash
+tkc summary --from-json
 ```
 
 查看最近日期排行：
@@ -94,7 +107,27 @@ tkc summary
 tkc summary
 tkc summary --source codex
 tkc summary --source claude
+tkc summary --from-json
 ```
+
+### `fetch`
+
+扫描本机 Claude Code 和 Codex 数据，并把结果合并保存到当前目录的 `data/tokencheck.json`。
+
+```bash
+tkc fetch
+tkc fetch --source codex
+tkc fetch --data-file data/usage.json
+```
+
+`fetch` 不会用当前扫描结果直接覆盖旧 JSON。它会先读取已有快照，再按稳定事件 ID 合并：
+
+- 新 session、usage event 和 tool event 会追加。
+- 同一个 usage event 只有在新扫描的 token 总量更大时才升级。
+- 如果新扫描结果缺少旧 JSON 中已有的数据，旧数据会保留。
+- 如果没有新增或升级内容，已有 JSON 文件不会被重写。
+
+JSON 中的 `tool_events` 只表示工具调用次数和来源；token 用量、模型、项目和日期保存在 `usage_events` 中。报表和 cost 会从 `usage_events` 重新聚合计算。
 
 ### `days`
 
@@ -168,6 +201,26 @@ tkc summary --home /Users/yourname
 ```
 
 这个参数适合测试、迁移数据或读取备份目录。
+
+### `--from-json`
+
+让报表命令从 JSON 快照读取数据，而不是扫描当前 `$HOME`。
+
+```bash
+tkc summary --from-json
+tkc days --from-json --limit 30
+```
+
+默认读取 `data/tokencheck.json`。
+
+### `--data-file`
+
+指定 `fetch` 写入或 `--from-json` 读取的 JSON 文件路径。
+
+```bash
+tkc fetch --data-file data/usage.json
+tkc models --from-json --data-file data/usage.json
+```
 
 ## 数据来源
 
