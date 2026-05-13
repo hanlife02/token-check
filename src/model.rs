@@ -1,0 +1,107 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Source {
+    Claude,
+    Codex,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Claude => "claude",
+            Source::Codex => "codex",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Usage {
+    pub input: u64,
+    pub cached_input: u64,
+    pub cache_creation_input: u64,
+    pub output: u64,
+    pub reasoning_output: u64,
+    pub total: u64,
+}
+
+impl Usage {
+    pub fn add_assign(&mut self, other: &Usage) {
+        self.input += other.input;
+        self.cached_input += other.cached_input;
+        self.cache_creation_input += other.cache_creation_input;
+        self.output += other.output;
+        self.reasoning_output += other.reasoning_output;
+        self.total += other.total;
+    }
+
+    pub fn computed_total(&self) -> u64 {
+        if self.total > 0 {
+            self.total
+        } else {
+            self.input + self.cached_input + self.cache_creation_input + self.output
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionMeta {
+    pub source: Source,
+    pub session_id: String,
+    pub date: String,
+    pub project: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct UsageEvent {
+    pub source: Source,
+    pub session_id: String,
+    pub date: String,
+    pub project: String,
+    pub model: String,
+    pub usage: Usage,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolEvent {
+    pub source: Source,
+    pub date: String,
+    pub project: String,
+    pub tool: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ReportData {
+    pub sessions: Vec<SessionMeta>,
+    pub usage_events: Vec<UsageEvent>,
+    pub tool_events: Vec<ToolEvent>,
+    pub warnings: Vec<String>,
+}
+
+impl ReportData {
+    pub fn merge(&mut self, mut other: ReportData) {
+        self.sessions.append(&mut other.sessions);
+        self.usage_events.append(&mut other.usage_events);
+        self.tool_events.append(&mut other.tool_events);
+        self.warnings.append(&mut other.warnings);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Roots {
+    pub home: PathBuf,
+}
+
+impl Roots {
+    pub fn claude_projects(&self) -> PathBuf {
+        self.home.join(".claude").join("projects")
+    }
+
+    pub fn codex_sessions(&self) -> PathBuf {
+        self.home.join(".codex").join("sessions")
+    }
+}
+
+pub type UsageMap<K> = BTreeMap<K, Usage>;
