@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod claude_code;
 pub mod codex;
 pub mod model;
@@ -421,4 +423,17 @@ fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("HOME is not set; pass --home explicitly"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_number;
+
+    #[test]
+    fn formats_numbers_with_group_separators() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(1_234_567_890), "1,234,567,890");
+    }
 }

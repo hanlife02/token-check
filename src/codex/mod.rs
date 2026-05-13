@@ -16,12 +16,19 @@ pub fn collect(sessions_root: &Path) -> Result<ReportData> {
         return Ok(data);
     }
 
-    for entry in WalkDir::new(sessions_root)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-    {
+    for entry in WalkDir::new(sessions_root) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                data.warnings
+                    .push(format!("Failed to walk Codex data: {err}"));
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() || !is_jsonl(entry.path()) {
+            continue;
+        }
+
         match collect_file(entry.path()) {
             Ok(file_data) => data.merge(file_data),
             Err(err) => data.warnings.push(format!(
@@ -44,6 +51,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
     let mut provider = String::new();
     let mut final_usage: Option<(String, Usage)> = None;
     let mut tool_events = Vec::new();
+    let mut warnings = Vec::new();
 
     for (line_index, line) in reader.lines().enumerate() {
         let line =
@@ -55,13 +63,12 @@ fn collect_file(path: &Path) -> Result<ReportData> {
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(err) => {
-                let mut data = ReportData::default();
-                data.warnings.push(format!(
+                warnings.push(format!(
                     "Invalid JSON in {} line {}: {err}",
                     path.display(),
                     line_index + 1
                 ));
-                return Ok(data);
+                continue;
             }
         };
 
@@ -155,6 +162,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
         });
     }
     data.tool_events = tool_events;
+    data.warnings = warnings;
     Ok(data)
 }
 
@@ -196,6 +204,10 @@ fn get_u64(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn is_jsonl(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
 fn date_from_timestamp(timestamp: &str) -> String {
     timestamp.get(0..10).unwrap_or("unknown").to_string()
 }
@@ -227,4 +239,61 @@ fn file_stem(path: &Path) -> String {
         .and_then(|stem| stem.to_str())
         .unwrap_or("unknown")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{codex_usage, date_from_path, is_jsonl, tool_name};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn reads_codex_usage_fields_without_message_content() {
+        let usage = codex_usage(&json!({
+            "input_tokens": 10,
+            "cached_input_tokens": 20,
+            "output_tokens": 30,
+            "reasoning_output_tokens": 40,
+            "total_tokens": 50
+        }));
+
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.cached_input, 20);
+        assert_eq!(usage.output, 30);
+        assert_eq!(usage.reasoning_output, 40);
+        assert_eq!(usage.computed_total(), 50);
+    }
+
+    #[test]
+    fn extracts_session_date_from_codex_path() {
+        let path = Path::new("/home/user/.codex/sessions/2026/05/13/session.jsonl");
+
+        assert_eq!(date_from_path(path).as_deref(), Some("2026-05-13"));
+    }
+
+    #[test]
+    fn maps_tool_event_names_from_response_items() {
+        assert_eq!(
+            tool_name(Some(
+                &json!({"type": "function_call", "name": "shell_command"})
+            )),
+            Some(String::from("shell_command"))
+        );
+        assert_eq!(
+            tool_name(Some(&json!({"type": "custom_tool_call"}))),
+            Some(String::from("custom_tool_call"))
+        );
+        assert_eq!(
+            tool_name(Some(&json!({"type": "web_search_call"}))),
+            Some(String::from("web_search"))
+        );
+        assert_eq!(tool_name(Some(&json!({"type": "message"}))), None);
+    }
+
+    #[test]
+    fn recognizes_jsonl_files_only() {
+        assert!(is_jsonl(Path::new("session.jsonl")));
+        assert!(!is_jsonl(Path::new("session.json")));
+        assert!(!is_jsonl(Path::new("session")));
+    }
 }

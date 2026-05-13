@@ -22,12 +22,19 @@ pub fn collect(projects_root: &Path) -> Result<ReportData> {
         return Ok(data);
     }
 
-    for entry in WalkDir::new(projects_root)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-    {
+    for entry in WalkDir::new(projects_root) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                data.warnings
+                    .push(format!("Failed to walk Claude Code data: {err}"));
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() || !is_jsonl(entry.path()) {
+            continue;
+        }
+
         match collect_file(entry.path()) {
             Ok(file_data) => data.merge(file_data),
             Err(err) => data.warnings.push(format!(
@@ -50,6 +57,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
     let mut usage_by_message: HashMap<String, SeenUsage> = HashMap::new();
     let mut tool_ids = HashSet::new();
     let mut tool_events = Vec::new();
+    let mut warnings = Vec::new();
 
     for (line_index, line) in reader.lines().enumerate() {
         let line =
@@ -61,13 +69,12 @@ fn collect_file(path: &Path) -> Result<ReportData> {
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(err) => {
-                let mut data = ReportData::default();
-                data.warnings.push(format!(
+                warnings.push(format!(
                     "Invalid JSON in {} line {}: {err}",
                     path.display(),
                     line_index + 1
                 ));
-                return Ok(data);
+                continue;
             }
         };
 
@@ -158,6 +165,7 @@ fn collect_file(path: &Path) -> Result<ReportData> {
     data.usage_events
         .extend(usage_by_message.into_values().map(|seen| seen.event));
     data.tool_events = tool_events;
+    data.warnings = warnings;
     Ok(data)
 }
 
@@ -222,6 +230,10 @@ fn get_u64(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn is_jsonl(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
 fn date_from_timestamp(timestamp: &str) -> String {
     timestamp.get(0..10).unwrap_or("unknown").to_string()
 }
@@ -239,4 +251,36 @@ fn project_from_dir(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(|name| name.trim_start_matches('-').replace('-', "/"))
         .unwrap_or_else(|| String::from("unknown"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{claude_usage, is_jsonl};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn reads_claude_usage_fields_without_message_content() {
+        let usage = claude_usage(&json!({
+            "input_tokens": 10,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 30,
+            "claude_cache_creation_1_h_tokens": 40,
+            "claude_cache_creation_5_m_tokens": 50,
+            "output_tokens": 60
+        }));
+
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.cached_input, 20);
+        assert_eq!(usage.cache_creation_input, 120);
+        assert_eq!(usage.output, 60);
+        assert_eq!(usage.computed_total(), 210);
+    }
+
+    #[test]
+    fn recognizes_jsonl_files_only() {
+        assert!(is_jsonl(Path::new("session.jsonl")));
+        assert!(!is_jsonl(Path::new("session.json")));
+        assert!(!is_jsonl(Path::new("session")));
+    }
 }

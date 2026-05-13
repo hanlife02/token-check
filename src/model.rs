@@ -105,3 +105,36 @@ impl Roots {
 }
 
 pub type UsageMap<K> = BTreeMap<K, Usage>;
+
+#[cfg(test)]
+mod tests {
+    use super::Usage;
+
+    #[test]
+    fn uses_explicit_total_when_present() {
+        let usage = Usage {
+            input: 10,
+            cached_input: 20,
+            cache_creation_input: 30,
+            output: 40,
+            reasoning_output: 50,
+            total: 70,
+        };
+
+        assert_eq!(usage.computed_total(), 70);
+    }
+
+    #[test]
+    fn computes_total_from_canonical_fields_when_missing() {
+        let usage = Usage {
+            input: 10,
+            cached_input: 20,
+            cache_creation_input: 30,
+            output: 40,
+            reasoning_output: 50,
+            total: 0,
+        };
+
+        assert_eq!(usage.computed_total(), 100);
+    }
+}
