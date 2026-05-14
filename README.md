@@ -146,11 +146,11 @@ tkc days --limit 30
 tkc days --chant
 ```
 
-加上 `--chant` 时会用竖直彩色柱状图展示每天的 total tokens。
+加上 `--chant` 时会用 Tokscale 风格的圆角面板和竖直彩色柱状图展示每天的 total tokens。
 
 ### `heatmap`
 
-按日聚合 total tokens，并输出类似 GitHub contributions 的周历热力图。横向是周，纵向是星期，绿色色块越深表示当天使用量越高。
+按日聚合 total tokens，并输出 Tokscale 风格的周历热力图。横向是周，纵向是星期，绿色色块越亮表示当天使用量越高。
 
 ```bash
 tkc heatmap

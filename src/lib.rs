@@ -12,9 +12,19 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use terminal_size::{terminal_size, Width};
 
 const DEFAULT_DATA_FILE: &str = "data/tokencheck.json";
-const HISTOGRAM_COLUMN_WIDTH: usize = 7;
+const DEFAULT_TERMINAL_WIDTH: usize = 100;
+const HISTOGRAM_COLUMN_WIDTH: usize = 6;
+const HISTOGRAM_HEIGHT: usize = 10;
+const HEATMAP_LABEL_WIDTH: usize = 8;
+const HEATMAP_WEEK_WIDTH: usize = 3;
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_BOLD_WHITE: &str = "\x1b[1;37m";
+const ANSI_BOLD_YELLOW: &str = "\x1b[1;33m";
+const ANSI_DIM: &str = "\x1b[2m";
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -392,24 +402,87 @@ fn daily_usage_rows(data: &ReportData, limit: usize) -> Vec<DailyUsageRow> {
 }
 
 fn print_days_histogram(rows: &[DailyUsageRow]) {
+    if rows.is_empty() {
+        println!("No usage data.");
+        return;
+    }
+
+    let panel_width = terminal_panel_width();
+    let inner_width = panel_width.saturating_sub(4);
+    let visible_rows = visible_histogram_rows(rows, inner_width);
+    if visible_rows.is_empty() {
+        print_rounded_panel(
+            "Daily Usage",
+            &[dim("Terminal is too narrow for the chart")],
+        );
+        return;
+    }
+
+    let max_usage = visible_rows
+        .iter()
+        .map(|row| row.stats.usage.computed_total())
+        .max()
+        .unwrap_or(0);
+    let total_tokens = visible_rows
+        .iter()
+        .map(|row| row.stats.usage.computed_total())
+        .sum();
+    let mut total_cost = billing::Cost::default();
+    for row in &visible_rows {
+        total_cost.add_assign(row.stats.cost);
+    }
+    let days_label = if visible_rows.len() == rows.len() {
+        visible_rows.len().to_string()
+    } else {
+        format!("{}/{}", visible_rows.len(), rows.len())
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} {}   {} {}",
+        dim("Max"),
+        bold_yellow(&format_number(max_usage)),
+        dim("Days"),
+        bold_yellow(&days_label)
+    ));
+    lines.push(format!(
+        "{} {}   {} {}",
+        dim("Tokens"),
+        bold_yellow(&format_number(total_tokens)),
+        dim("Cost"),
+        bold_yellow(&format_histogram_cost(total_cost))
+    ));
+    lines.push(String::new());
+    lines.extend(vertical_histogram_lines(
+        &visible_rows,
+        max_usage,
+        HISTOGRAM_HEIGHT,
+    ));
+    lines.push(String::new());
+    lines.push(heatmap_legend_line());
+
+    print_rounded_panel("Daily Usage", &lines);
+}
+
+fn visible_histogram_rows(rows: &[DailyUsageRow], available_width: usize) -> Vec<DailyUsageRow> {
     let max_usage = rows
         .iter()
         .map(|row| row.stats.usage.computed_total())
         .max()
         .unwrap_or(0);
-    println!("daily usage histogram");
-    println!("max day: {}", format_number(max_usage));
-    println!();
-
-    if rows.is_empty() {
-        return;
-    }
-    print_vertical_histogram(rows, max_usage, 10);
+    let axis_width = format_number(max_usage).len().max(4);
+    let max_columns = max_histogram_columns(available_width, axis_width).min(rows.len());
+    rows.iter().take(max_columns).cloned().collect()
 }
 
-fn print_vertical_histogram(rows: &[DailyUsageRow], max_usage: u64, height: usize) {
+fn max_histogram_columns(available_width: usize, axis_width: usize) -> usize {
+    available_width.saturating_sub(axis_width + 2) / HISTOGRAM_COLUMN_WIDTH
+}
+
+fn vertical_histogram_lines(rows: &[DailyUsageRow], max_usage: u64, height: usize) -> Vec<String> {
     let columns = rows
         .iter()
+        .rev()
         .map(|row| {
             let total = row.stats.usage.computed_total();
             HistogramColumn {
@@ -422,27 +495,48 @@ fn print_vertical_histogram(rows: &[DailyUsageRow], max_usage: u64, height: usiz
         })
         .collect::<Vec<_>>();
 
+    let axis_width = format_number(max_usage).len().max(4);
+    let mut lines = Vec::new();
     for level in (1..=height).rev() {
-        print!("      ");
+        let label = histogram_axis_label(level, height, max_usage);
+        let mut line = format!("{label:>axis_width$} │");
         for column in &columns {
             if column.height >= level {
-                print!("{}   ", heatmap_cell_for_level_width(column.level, 4));
+                line.push_str(&center_visible(
+                    &heatmap_cell_for_level(column.level),
+                    HISTOGRAM_COLUMN_WIDTH,
+                ));
             } else {
-                print!("{:width$}", "", width = HISTOGRAM_COLUMN_WIDTH);
+                line.push_str(&" ".repeat(HISTOGRAM_COLUMN_WIDTH));
             }
         }
-        println!();
+        lines.push(line);
     }
-    print!("      ");
-    for _ in &columns {
-        print!("{:^width$}", "--", width = HISTOGRAM_COLUMN_WIDTH);
-    }
-    println!();
-    print_histogram_label_row(&columns, |column| {
+    lines.push(format!(
+        "{:>axis_width$} └{}",
+        "",
+        "─".repeat(columns.len() * HISTOGRAM_COLUMN_WIDTH)
+    ));
+    lines.push(histogram_label_row(&columns, axis_width, |column| {
         column.date.get(5..10).unwrap_or(column.date).to_string()
-    });
-    print_histogram_label_row(&columns, |column| format_number(column.total));
-    print_histogram_label_row(&columns, |column| format_cost(column.cost));
+    }));
+    lines.push(histogram_label_row(&columns, axis_width, |column| {
+        format_number(column.total)
+    }));
+    lines.push(histogram_label_row(&columns, axis_width, |column| {
+        format_histogram_cost(column.cost)
+    }));
+    lines
+}
+
+fn histogram_axis_label(level: usize, height: usize, max_usage: u64) -> String {
+    if level == height {
+        format_number(max_usage)
+    } else if level == 1 {
+        String::from("0")
+    } else {
+        String::new()
+    }
 }
 
 fn print_heatmap(data: &ReportData, months: usize) {
@@ -474,38 +568,84 @@ fn print_heatmap(data: &ReportData, months: usize) {
         month: end_month_number,
         day: days_in_month(end_year, end_month_number),
     };
-    let selected_max = usage_by_date
-        .iter()
-        .filter(|(date, _)| **date >= start_date && **date <= end_date)
-        .map(|(_, stats)| stats.usage.computed_total())
-        .max()
-        .unwrap_or(0);
     let first_grid_date = start_date.add_days(-(start_date.weekday_sunday_index() as i64));
     let last_grid_date = end_date.add_days((6 - end_date.weekday_sunday_index()) as i64);
     let week_count =
         ((last_grid_date.days_since_epoch() - first_grid_date.days_since_epoch()) / 7 + 1) as usize;
+    let panel_width = terminal_panel_width();
+    let inner_width = panel_width.saturating_sub(4);
+    let visible_week_count = max_heatmap_weeks(inner_width).min(week_count);
+    if visible_week_count == 0 {
+        print_rounded_panel(
+            "Contribution Heatmap",
+            &[dim("Terminal is too narrow for the heatmap")],
+        );
+        return;
+    }
+    let skipped_weeks = week_count - visible_week_count;
+    let visible_first_grid_date = first_grid_date.add_days((skipped_weeks * 7) as i64);
+    let visible_start_date = visible_first_grid_date.max(start_date);
+    let selected_max = usage_by_date
+        .iter()
+        .filter(|(date, _)| **date >= visible_start_date && **date <= end_date)
+        .map(|(_, stats)| stats.usage.computed_total())
+        .max()
+        .unwrap_or(0);
+    let range_label = if visible_week_count == week_count {
+        format!("{months}mo")
+    } else {
+        format!("{visible_week_count}/{week_count}w")
+    };
 
-    println!("usage heatmap (daily total tokens)");
-    println!("max day: {}", format_number(selected_max));
-    print_github_month_labels(first_grid_date, week_count, start_month, latest_month);
-    print_github_heatmap_grid(
-        first_grid_date,
-        week_count,
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} {}   {}",
+        dim("Max"),
+        bold_yellow(&format_number(selected_max)),
+        bold_yellow(&range_label)
+    ));
+    lines.push(String::new());
+    lines.push(github_month_labels_line(
+        visible_first_grid_date,
+        visible_week_count,
+        start_month,
+        latest_month,
+        start_date,
+        end_date,
+    ));
+    lines.extend(github_heatmap_grid_lines(
+        visible_first_grid_date,
+        visible_week_count,
         start_date,
         end_date,
         selected_max,
         &usage_by_date,
-    );
-    print_github_heatmap_legend();
+    ));
+    lines.push(String::new());
+    lines.push(heatmap_legend_line());
+
+    print_rounded_panel("Contribution Heatmap", &lines);
 }
 
-fn print_github_month_labels(
+fn max_heatmap_weeks(available_width: usize) -> usize {
+    available_width.saturating_sub(HEATMAP_LABEL_WIDTH) / HEATMAP_WEEK_WIDTH
+}
+
+fn github_month_labels_line(
     first_grid_date: CivilDate,
     week_count: usize,
     start_month: i32,
     latest_month: i32,
-) {
+    start_date: CivilDate,
+    end_date: CivilDate,
+) -> String {
     let mut labels = vec![String::from("   "); week_count];
+    let first_visible_date = (0..week_count * 7)
+        .map(|offset| first_grid_date.add_days(offset as i64))
+        .find(|date| *date >= start_date && *date <= end_date);
+    if let Some(date) = first_visible_date {
+        labels[0] = month_abbr(date.month).to_string();
+    }
     for month_index in start_month..=latest_month {
         let (year, month) = CivilDate::from_month_index(month_index);
         let first_of_month = CivilDate {
@@ -513,47 +653,51 @@ fn print_github_month_labels(
             month,
             day: 1,
         };
-        let week_index =
-            ((first_of_month.days_since_epoch() - first_grid_date.days_since_epoch()) / 7) as usize;
-        if week_index < labels.len() {
-            labels[week_index] = month_abbr(month).to_string();
+        let diff_days = first_of_month.days_since_epoch() - first_grid_date.days_since_epoch();
+        if diff_days >= 0 {
+            let week_index = (diff_days / 7) as usize;
+            if week_index < labels.len() {
+                place_month_label(&mut labels, week_index, month_abbr(month));
+            }
         }
     }
-    println!("     {}", labels.join(""));
+    dim(&format!("        {}", labels.join("")))
 }
 
-fn print_github_heatmap_grid(
+fn place_month_label(labels: &mut [String], week_index: usize, label: &str) {
+    if week_index > 0 && !labels[week_index - 1].trim().is_empty() {
+        return;
+    }
+    labels[week_index] = label.to_string();
+}
+
+fn github_heatmap_grid_lines(
     first_grid_date: CivilDate,
     week_count: usize,
     start_date: CivilDate,
     end_date: CivilDate,
     max_usage: u64,
     usage_by_date: &BTreeMap<CivilDate, UsageStats>,
-) {
+) -> Vec<String> {
+    let mut lines = Vec::new();
     for weekday in 0..7 {
-        print!("{:>3}  ", weekday_label(weekday));
+        let mut line = format!("{}  ", dim(&format!("{:>6}", weekday_label(weekday))));
         for week in 0..week_count {
             let date = first_grid_date.add_days((week * 7 + weekday) as i64);
             if date < start_date || date > end_date {
-                print!("   ");
+                line.push_str("   ");
                 continue;
             }
             let usage = usage_by_date
                 .get(&date)
                 .map(|stats| stats.usage.computed_total())
                 .unwrap_or(0);
-            print!("{} ", heatmap_cell(usage, max_usage));
+            line.push_str(&heatmap_cell(usage, max_usage));
+            line.push(' ');
         }
-        println!();
+        lines.push(line);
     }
-}
-
-fn print_github_heatmap_legend() {
-    print!("     less ");
-    for level in [0, 5, 10, 15] {
-        print!("{} ", heatmap_cell_for_level(level));
-    }
-    println!("more");
+    lines
 }
 
 fn print_projects(data: &ReportData, limit: usize) {
@@ -772,22 +916,36 @@ fn print_row(row: Vec<String>, widths: &[usize]) {
 }
 
 fn display_width(value: &str) -> usize {
-    value.chars().count()
+    let mut width = 0;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for sequence_ch in chars.by_ref() {
+                if sequence_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
 }
 
-fn print_histogram_label_row<'a>(
+fn histogram_label_row<'a>(
     columns: &[HistogramColumn<'a>],
+    axis_width: usize,
     label_fn: impl Fn(&HistogramColumn<'a>) -> String,
-) {
-    print!("      ");
+) -> String {
+    let mut line = format!("{:>axis_width$}  ", "");
     for column in columns {
-        print!(
-            "{:^width$}",
-            fit_histogram_label(&label_fn(column), HISTOGRAM_COLUMN_WIDTH),
-            width = HISTOGRAM_COLUMN_WIDTH
-        );
+        line.push_str(&center_visible(
+            &fit_histogram_label(&label_fn(column), HISTOGRAM_COLUMN_WIDTH),
+            HISTOGRAM_COLUMN_WIDTH,
+        ));
     }
-    println!();
+    line
 }
 
 fn fit_histogram_label(value: &str, width: usize) -> String {
@@ -796,6 +954,136 @@ fn fit_histogram_label(value: &str, width: usize) -> String {
         return value.to_string();
     }
     chars.into_iter().take(width).collect()
+}
+
+fn format_histogram_cost(cost: billing::Cost) -> String {
+    let marked = cost.unpriced_events > 0;
+    let mut out = if cost.usd >= 100.0 {
+        format!("${:.0}", cost.usd)
+    } else if cost.usd >= 10.0 || marked {
+        format!("${:.1}", cost.usd)
+    } else {
+        format_dollars(cost.usd)
+    };
+    if marked {
+        out.push('*');
+    }
+    fit_histogram_label(&out, HISTOGRAM_COLUMN_WIDTH.saturating_sub(1).max(1))
+}
+
+fn center_visible(value: &str, width: usize) -> String {
+    let value_width = display_width(value);
+    if value_width >= width {
+        return value.to_string();
+    }
+    let padding = width - value_width;
+    let left = padding / 2;
+    let right = padding - left;
+    format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
+}
+
+fn pad_right_visible(value: &str, width: usize) -> String {
+    format!(
+        "{}{}",
+        value,
+        " ".repeat(width.saturating_sub(display_width(value)))
+    )
+}
+
+fn print_rounded_panel(title: &str, lines: &[String]) {
+    let panel_width = terminal_panel_width();
+    let inner_limit = panel_width.saturating_sub(4);
+    let title_width = display_width(title) + 2;
+    let inner_width = lines
+        .iter()
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0)
+        .max(title_width + 1)
+        .min(inner_limit);
+    let border_width = inner_width + 2;
+    let top_width = border_width + 2;
+    let title_label = if top_width > 6 {
+        truncate_visible(&format!(" {title} "), top_width.saturating_sub(3))
+    } else {
+        String::new()
+    };
+    let title_label_width = display_width(&title_label);
+    let fill_width = top_width.saturating_sub(title_label_width + 3);
+
+    println!(
+        "{ANSI_CYAN}╭─{ANSI_BOLD_WHITE}{title_label}{ANSI_RESET}{ANSI_CYAN}{}╮{ANSI_RESET}",
+        "─".repeat(fill_width)
+    );
+    for line in lines {
+        let line = truncate_visible(line, inner_width);
+        println!(
+            "{ANSI_CYAN}│{ANSI_RESET} {} {ANSI_CYAN}│{ANSI_RESET}",
+            pad_right_visible(&line, inner_width)
+        );
+    }
+    println!("{ANSI_CYAN}╰{}╯{ANSI_RESET}", "─".repeat(border_width));
+}
+
+fn truncate_visible(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+
+    let mut out = String::new();
+    let mut visible_width = 0;
+    let mut saw_escape = false;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            saw_escape = true;
+            out.push(ch);
+            out.push(chars.next().unwrap_or('['));
+            for sequence_ch in chars.by_ref() {
+                out.push(sequence_ch);
+                if sequence_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        if visible_width >= width {
+            break;
+        }
+        out.push(ch);
+        visible_width += 1;
+    }
+    if saw_escape {
+        out.push_str(ANSI_RESET);
+    }
+    out
+}
+
+fn terminal_panel_width() -> usize {
+    detected_terminal_width()
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+        .saturating_sub(1)
+        .max(4)
+}
+
+fn detected_terminal_width() -> Option<usize> {
+    env::var("COLUMNS")
+        .ok()
+        .and_then(|value| parse_terminal_width(&value))
+        .or_else(native_terminal_width)
+}
+
+fn native_terminal_width() -> Option<usize> {
+    let (Width(width), _) = terminal_size()?;
+    Some(usize::from(width))
+}
+
+fn parse_terminal_width(value: &str) -> Option<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|width| *width > 0)
 }
 
 fn histogram_height(value: u64, max_value: u64, height: usize) -> usize {
@@ -859,34 +1147,45 @@ fn heatmap_level(usage: u64, max_usage: u64) -> usize {
     if usage == 0 || max_usage == 0 {
         return 0;
     }
-    let index = (((usage as u128) * 15 - 1) / (max_usage as u128)) as usize + 1;
-    index.min(15)
+    let ratio = (usage as f64).ln_1p() / (max_usage as f64).ln_1p().max(1.0);
+    if ratio <= 0.2 {
+        1
+    } else if ratio <= 0.4 {
+        2
+    } else if ratio <= 0.65 {
+        3
+    } else {
+        4
+    }
 }
 
 fn heatmap_cell_for_level(level: usize) -> String {
-    heatmap_cell_for_level_width(level, 2)
-}
-
-fn heatmap_cell_for_level_width(level: usize, width: usize) -> String {
     let color = match level {
         0 => 237,
         1 => 22,
         2 => 28,
         3 => 34,
-        4 => 40,
-        5 => 46,
-        6 => 82,
-        7 => 118,
-        8 => 154,
-        9 => 190,
-        10 => 226,
-        11 => 220,
-        12 => 214,
-        13 => 208,
-        14 => 202,
-        _ => 196,
+        _ => 46,
     };
-    format!("\x1b[48;5;{color}m{}\x1b[0m", " ".repeat(width))
+    format!("\x1b[38;5;{color}m██\x1b[0m")
+}
+
+fn heatmap_legend_line() -> String {
+    let mut line = format!("{} ", dim("Less"));
+    for level in 0..=4 {
+        line.push_str(&heatmap_cell_for_level(level));
+    }
+    line.push(' ');
+    line.push_str(&dim("More"));
+    line
+}
+
+fn bold_yellow(value: &str) -> String {
+    format!("{ANSI_BOLD_YELLOW}{value}{ANSI_RESET}")
+}
+
+fn dim(value: &str) -> String {
+    format!("{ANSI_DIM}{value}{ANSI_RESET}")
 }
 
 fn month_abbr(month: u8) -> &'static str {
@@ -1024,8 +1323,9 @@ fn home_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fit_histogram_label, format_cost, format_dollars, format_number, heatmap_level,
-        histogram_height, CivilDate,
+        display_width, fit_histogram_label, format_cost, format_dollars, format_number,
+        heatmap_level, histogram_height, max_heatmap_weeks, max_histogram_columns,
+        parse_terminal_width, truncate_visible, CivilDate,
     };
     use crate::billing::Cost;
 
@@ -1127,8 +1427,9 @@ mod tests {
     fn maps_usage_to_heatmap_levels() {
         assert_eq!(heatmap_level(0, 100), 0);
         assert_eq!(heatmap_level(1, 100), 1);
-        assert_eq!(heatmap_level(50, 100), 8);
-        assert_eq!(heatmap_level(100, 100), 15);
+        assert_eq!(heatmap_level(10, 100), 3);
+        assert_eq!(heatmap_level(50, 100), 4);
+        assert_eq!(heatmap_level(100, 100), 4);
     }
 
     #[test]
@@ -1144,5 +1445,31 @@ mod tests {
         assert_eq!(fit_histogram_label("05-13", 7), "05-13");
         assert_eq!(fit_histogram_label("$301.30", 7), "$301.30");
         assert_eq!(fit_histogram_label("$1234.56", 7), "$1234.5");
+    }
+
+    #[test]
+    fn measures_ansi_styled_display_width() {
+        assert_eq!(display_width("\x1b[38;5;46m██\x1b[0m"), 2);
+        assert_eq!(display_width("\x1b[2mLess\x1b[0m"), 4);
+    }
+
+    #[test]
+    fn truncates_ansi_styled_text_by_visible_width() {
+        let value = truncate_visible("\x1b[2mabcdef\x1b[0m", 3);
+        assert_eq!(display_width(&value), 3);
+        assert!(value.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn calculates_chart_columns_from_available_width() {
+        assert_eq!(max_histogram_columns(41, 4), 5);
+        assert_eq!(max_heatmap_weeks(44), 12);
+    }
+
+    #[test]
+    fn parses_terminal_width_values() {
+        assert_eq!(parse_terminal_width("80\n"), Some(80));
+        assert_eq!(parse_terminal_width("0"), None);
+        assert_eq!(parse_terminal_width("wide"), None);
     }
 }
