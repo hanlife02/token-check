@@ -66,26 +66,63 @@ jobs:
         id: published
         shell: bash
         run: |
+          crate="${{ steps.crate.outputs.name }}"
+          version="${{ steps.crate.outputs.version }}"
+
+          case "${#crate}" in
+            1)
+              index_path="1/$crate"
+              ;;
+            2)
+              index_path="2/$crate"
+              ;;
+            3)
+              index_path="3/${crate:0:1}/$crate"
+              ;;
+            *)
+              index_path="${crate:0:2}/${crate:2:2}/$crate"
+              ;;
+          esac
+
           status="$(
             curl \
               --silent \
               --show-error \
               --location \
               --retry 3 \
-              --output crates-response.json \
+              --user-agent "token-check-release (https://github.com/hanlife02/token-check)" \
+              --output crates-index.jsonl \
               --write-out "%{http_code}" \
-              "https://crates.io/api/v1/crates/${{ steps.crate.outputs.name }}/${{ steps.crate.outputs.version }}"
+              "https://index.crates.io/$index_path"
           )"
 
           case "$status" in
             200)
-              echo "exists=true" >> "$GITHUB_OUTPUT"
+              if python3 - "$version" crates-index.jsonl <<'PY'
+          import json
+          import sys
+
+          version = sys.argv[1]
+          index_file = sys.argv[2]
+
+          with open(index_file, encoding="utf-8") as lines:
+              for line in lines:
+                  if line.strip() and json.loads(line).get("vers") == version:
+                      sys.exit(0)
+
+          sys.exit(1)
+          PY
+              then
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "exists=false" >> "$GITHUB_OUTPUT"
+              fi
               ;;
             404)
               echo "exists=false" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              cat crates-response.json
+              cat crates-index.jsonl
               echo "Unexpected crates.io status: $status" >&2
               exit 1
               ;;
