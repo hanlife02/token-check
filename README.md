@@ -276,11 +276,11 @@ Codex：
 ## 计费口径
 
 - `summary`、`days`、`projects` 和 `models` 会输出 `cost`，单位是美元。
-- Codex/OpenAI 模型按 input、cached input 和 output 分别计费；cached input 视为 input 的子集，不重复计入普通 input。
-- Claude 模型按 input、cache read、5 分钟 cache write、1 小时 cache write 和 output 分别计费。
-- 当前内置价格覆盖 `gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.4-nano`、`gpt-5.3-codex` 以及常见 Claude Opus/Sonnet/Haiku 官方模型名。
+- Codex 数据里的 cached input 视为 input 的子集，不重复计入普通 input；Claude Code 数据里的 cache read/cache write 按独立字段计费。
+- Claude 模型按 input、cache read、5 分钟 cache write、1 小时 cache write 和 output 分别计费；其他文本模型按 input、cached input/cache hit 和 output 估算。
+- 当前内置价格覆盖常见 OpenAI GPT/o 系列、Claude Opus/Sonnet/Haiku、Gemini 3/2.5/2.0、DeepSeek V4、MiMo V2/V2.5、Kimi K2/Moonshot V1 官方模型名和常见 snapshot 名。
 - 如果模型没有内置价格，成本显示会带 `*`，并在 warning 中说明该模型未计入美元总额。
-- 成本只按 token 估算，不包含订阅费、Batch/Flex/Priority 折扣、工具调用附加费、税费或第三方代理加价。
+- 成本只按文本 token 估算，不包含订阅费、Batch/Flex/Priority 折扣、工具调用附加费、图片/音频/视频单独计费、税费或第三方代理加价。
 
 ## 隐私边界
 
