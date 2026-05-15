@@ -4,7 +4,7 @@
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.6.3`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+当前 crate 版本：`0.7.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能概览
 
@@ -17,6 +17,8 @@
 - 按工具名查看调用次数。
 - 将本机扫描结果合并保存为 JSON 快照，避免本机日志缺失、清理或轮转后丢失历史统计。
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
+- 支持 `tkc config` 交互式配置默认数据来源、快照路径、输出语言、默认行数和热力图月份数。
+- 支持英文和中文输出。
 
 ## 安装与更新
 
@@ -74,6 +76,12 @@ tkc summary
 tkc fetch
 ```
 
+交互式配置默认行为：
+
+```bash
+tkc config
+```
+
 查看最近 10 天的表格统计：
 
 ```bash
@@ -117,8 +125,9 @@ tkc summary --from-json --data-file data/workstation.json
 
 报表命令默认会做两件事：
 
-1. 扫描当前用户 `$HOME` 下的 Claude Code 和 Codex 本地数据。
-2. 如果当前目录存在 `data/tokencheck.json`，把快照数据和实时扫描结果合并后展示。
+1. 读取 `tkc config` 保存的配置；如果没有配置文件，则使用内置默认值。
+2. 扫描当前用户 `$HOME` 下的 Claude Code 和 Codex 本地数据。
+3. 如果配置的快照文件存在，默认是 `data/tokencheck.json`，把快照数据和实时扫描结果合并后展示。
 
 这样可以保留历史统计：即使 Claude Code 或 Codex 的原始日志后续被清理，只要你之前运行过 `tkc fetch`，快照中的旧数据仍然会参与报表。
 
@@ -130,11 +139,24 @@ ReportData -> source filter -> command aggregation -> terminal output
 
 `fetch` 是唯一会写入快照的命令。其他报表命令只读取和展示数据。
 
+默认配置文件位置：
+
+```text
+~/.config/tokencheck/config.json
+```
+
+如果设置了 `XDG_CONFIG_HOME`，配置会写入：
+
+```text
+$XDG_CONFIG_HOME/tokencheck/config.json
+```
+
 ## 命令一览
 
 | 命令 | 作用 | 常用场景 |
 | --- | --- | --- |
 | `tkc` | 默认执行 `summary` | 快速查看总览 |
+| `tkc config` | 交互式配置默认行为 | 设置语言、快照路径、默认来源和默认显示数量 |
 | `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
 | `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
 | `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
@@ -155,16 +177,67 @@ tkc summary --source codex
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--source all\|claude\|codex` | `all` | 选择数据来源。`all` 同时统计 Claude Code 和 Codex。 |
+| `--source all\|claude\|codex` | 配置值，初始为 `all` | 选择数据来源。`all` 同时统计 Claude Code 和 Codex。 |
 | `--home <PATH>` | 当前 `$HOME` | 指定要扫描的 home 目录。适合测试、读取备份目录或统计另一份用户数据。 |
-| `--limit <N>` | `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
+| `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
 | `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
-| `--data-file <PATH>` | `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
+| `--data-file <PATH>` | 配置值，初始为 `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
 | `-h`, `--help` | - | 打印命令帮助。 |
 
 `--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
+命令行参数会覆盖 `tkc config` 保存的默认值。
 
 ## 命令详解
+
+### `tkc config`
+
+`config` 会在终端中一步一步询问配置项，并保存为 JSON 配置文件。每一步直接按 Enter 会保留当前显示的值；如果之前没有配置过，则保留内置默认值并保存。
+
+```bash
+tkc config
+```
+
+可配置项：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `language` | `en` | 输出语言。支持 `en` 和 `zh`。 |
+| `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`。 |
+| `data_file` | `data/tokencheck.json` | 默认快照文件路径，也就是 `fetch` 保存和 `--from-json` 读取的位置。 |
+| `limit` | `20` | 默认表格或排行行数。 |
+| `heatmap_months` | `12` | `heatmap` 默认展示月份数。 |
+
+示例流程：
+
+```text
+tokencheck config
+Config file: /Users/you/.config/tokencheck/config.json
+Press Enter on a blank input to keep and save the shown value.
+
+Language [en/zh] (current: en):
+Default source [all/claude/codex] (current: all):
+Snapshot data file (current: data/tokencheck.json): ~/.tokencheck/usage.json
+Default row limit (current: 20):
+Default heatmap months (current: 12):
+
+config saved: /Users/you/.config/tokencheck/config.json
+```
+
+配置保存后，普通命令会自动使用这些默认值：
+
+```bash
+tkc fetch
+tkc summary
+tkc heatmap
+```
+
+仍然可以临时覆盖：
+
+```bash
+tkc summary --source codex
+tkc fetch --data-file data/one-off.json
+tkc heatmap --months 6
+```
 
 ### `tkc` / `tkc summary`
 
@@ -298,7 +371,7 @@ tkc heatmap --source codex
 
 规则：
 
-- 默认展示最近 12 个月。
+- 默认展示配置中的 `heatmap_months`，初始为最近 12 个月。
 - `--months <N>` 控制月份跨度，最小按 1 个月处理。
 - 时间范围以数据中的最新日期为结束月份，不一定是今天。
 - 色阶按当前可见范围内的最大日用量归一化。
@@ -413,7 +486,7 @@ Codex：
 
 ## JSON 快照
 
-默认快照路径是：
+默认快照路径来自 `tkc config` 的 `data_file`，初始值是：
 
 ```text
 data/tokencheck.json
@@ -434,7 +507,7 @@ tkc days --from-json --limit 30
 - 想在不扫描 `$HOME` 的情况下查看报表。
 - 想把统计数据带到另一台机器上查看。
 
-报表命令默认会合并实时扫描和快照。要只看快照，必须加 `--from-json`。
+报表命令默认会合并实时扫描和快照。要只看快照，必须加 `--from-json`。要永久修改快照位置，运行 `tkc config` 并设置 `Snapshot data file`；要临时覆盖，使用 `--data-file <PATH>`。
 
 ## 计费口径
 

@@ -60,13 +60,19 @@ pub fn event_cost(event: &UsageEvent) -> Cost {
 }
 
 pub fn unpriced_model_warnings<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
+    unpriced_models(events)
+        .into_iter()
+        .map(|model| format!("No pricing configured for {model}; omitted from dollar totals"))
+        .collect()
+}
+
+pub fn unpriced_models<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
     events
         .filter(|event| event.usage.computed_total() > 0)
         .filter(|event| price_rule_for_model(&event.model).is_none())
         .map(|event| format!("{}/{}", event.source.label(), event.model))
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|model| format!("No pricing configured for {model}; omitted from dollar totals"))
         .collect()
 }
 

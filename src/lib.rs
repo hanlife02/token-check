@@ -3,18 +3,20 @@
 pub mod billing;
 pub mod claude_code;
 pub mod codex;
+pub mod config;
 pub mod model;
 pub mod snapshot;
 
+use crate::config::{AppConfig, Language, SourcePreference};
 use crate::model::{ReportData, Roots, Source, Usage};
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
 use terminal_size::{terminal_size, Width};
 
-const DEFAULT_DATA_FILE: &str = "data/tokencheck.json";
 const DEFAULT_TERMINAL_WIDTH: usize = 100;
 const HISTOGRAM_COLUMN_WIDTH: usize = 6;
 const HISTOGRAM_HEIGHT: usize = 10;
@@ -33,24 +35,25 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    #[arg(long, global = true, value_enum, default_value_t = SourceFilter::All)]
-    source: SourceFilter,
+    #[arg(long, global = true, value_enum)]
+    source: Option<SourceFilter>,
 
     #[arg(long, global = true)]
     home: Option<PathBuf>,
 
-    #[arg(long, global = true, default_value_t = 20)]
-    limit: usize,
+    #[arg(long, global = true)]
+    limit: Option<usize>,
 
     #[arg(long, global = true)]
     from_json: bool,
 
-    #[arg(long, global = true, default_value = DEFAULT_DATA_FILE)]
-    data_file: PathBuf,
+    #[arg(long, global = true)]
+    data_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    Config,
     Fetch,
     Summary,
     Days {
@@ -58,8 +61,8 @@ enum Command {
         chant: bool,
     },
     Heatmap {
-        #[arg(long, default_value_t = 12)]
-        months: usize,
+        #[arg(long)]
+        months: Option<usize>,
     },
     Projects,
     Models,
@@ -82,38 +85,494 @@ enum SourceFilter {
     Codex,
 }
 
+impl From<SourcePreference> for SourceFilter {
+    fn from(value: SourcePreference) -> Self {
+        match value {
+            SourcePreference::All => SourceFilter::All,
+            SourcePreference::Claude => SourceFilter::Claude,
+            SourcePreference::Codex => SourceFilter::Codex,
+        }
+    }
+}
+
+impl From<SourceFilter> for SourcePreference {
+    fn from(value: SourceFilter) -> Self {
+        match value {
+            SourceFilter::All => SourcePreference::All,
+            SourceFilter::Claude => SourcePreference::Claude,
+            SourceFilter::Codex => SourcePreference::Codex,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EffectiveSettings {
+    language: Language,
+    source: SourceFilter,
+    limit: usize,
+    data_file: PathBuf,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Summary);
-    if matches!(command, Command::Fetch) {
-        return run_fetch(cli.source, cli.home, cli.data_file);
+    let app_config = config::load_or_default()?;
+    if matches!(command, Command::Config) {
+        return run_config(app_config);
     }
 
-    let data = report_data(cli.source, cli.home, &cli.data_file, cli.from_json)?;
+    let settings = EffectiveSettings {
+        language: app_config.language,
+        source: cli.source.unwrap_or_else(|| app_config.source.into()),
+        limit: cli.limit.unwrap_or(app_config.limit),
+        data_file: expand_home_path(
+            cli.data_file
+                .unwrap_or_else(|| app_config.data_file.clone()),
+        )?,
+    };
+
+    if matches!(command, Command::Fetch) {
+        return run_fetch(
+            settings.source,
+            cli.home,
+            settings.data_file,
+            settings.language,
+        );
+    }
+
+    let data = report_data(
+        settings.source,
+        cli.home,
+        &settings.data_file,
+        cli.from_json,
+    )?;
     let shows_cost = command.shows_cost();
 
     match command {
+        Command::Config => unreachable!("config returns before report rendering"),
         Command::Fetch => unreachable!("fetch returns before report rendering"),
-        Command::Summary => print_summary(&data),
-        Command::Days { chant } => print_days(&data, cli.limit, chant),
-        Command::Heatmap { months } => print_heatmap(&data, months),
-        Command::Projects => print_projects(&data, cli.limit),
-        Command::Models => print_models(&data, cli.limit),
-        Command::Tools => print_tools(&data, cli.limit),
+        Command::Summary => print_summary(&data, settings.language),
+        Command::Days { chant } => print_days(&data, settings.limit, chant, settings.language),
+        Command::Heatmap { months } => print_heatmap(
+            &data,
+            months.unwrap_or(app_config.heatmap_months),
+            settings.language,
+        ),
+        Command::Projects => print_projects(&data, settings.limit, settings.language),
+        Command::Models => print_models(&data, settings.limit, settings.language),
+        Command::Tools => print_tools(&data, settings.limit, settings.language),
     }
 
     let mut warnings = data.warnings.clone();
     if shows_cost {
-        warnings.extend(billing::unpriced_model_warnings(data.usage_events.iter()));
+        warnings.extend(localized_unpriced_model_warnings(
+            settings.language,
+            data.usage_events.iter(),
+        ));
     }
-    if !warnings.is_empty() {
-        eprintln!("\nWarnings:");
-        for warning in &warnings {
-            eprintln!("- {warning}");
-        }
-    }
+    print_warnings(settings.language, &warnings);
 
     Ok(())
+}
+
+fn run_config(mut app_config: AppConfig) -> Result<()> {
+    let config_path = config::config_path()?;
+    println!("{}", label_config_title(app_config.language));
+    println!(
+        "{}: {}",
+        label_config_file(app_config.language),
+        config_path.display()
+    );
+    println!("{}", label_config_keep_hint(app_config.language));
+    println!();
+
+    app_config.language = prompt_language(app_config.language)?;
+    app_config.source = prompt_source(app_config.language, app_config.source)?;
+    app_config.data_file = prompt_path(
+        app_config.language,
+        label_config_data_file(app_config.language),
+        &app_config.data_file,
+    )?;
+    app_config.limit = prompt_positive_usize(
+        app_config.language,
+        label_config_limit(app_config.language),
+        app_config.limit,
+    )?;
+    app_config.heatmap_months = prompt_positive_usize(
+        app_config.language,
+        label_config_heatmap_months(app_config.language),
+        app_config.heatmap_months,
+    )?;
+
+    let saved_path = config::save(&app_config)?;
+    println!();
+    println!(
+        "{}: {}",
+        label_config_saved(app_config.language),
+        saved_path.display()
+    );
+    Ok(())
+}
+
+fn prompt_language(current: Language) -> Result<Language> {
+    loop {
+        let prompt = format!(
+            "{} [en/zh] ({}: {}): ",
+            label_config_language(current),
+            label_current(current),
+            current.as_str()
+        );
+        let input = prompt_line(&prompt)?;
+        if input.trim().is_empty() {
+            return Ok(current);
+        }
+        if let Some(language) = Language::parse(&input) {
+            return Ok(language);
+        }
+        eprintln!("{}", label_invalid_language(current));
+    }
+}
+
+fn prompt_source(language: Language, current: SourcePreference) -> Result<SourcePreference> {
+    loop {
+        let prompt = format!(
+            "{} [all/claude/codex] ({}: {}): ",
+            label_config_source(language),
+            label_current(language),
+            current.as_str()
+        );
+        let input = prompt_line(&prompt)?;
+        if input.trim().is_empty() {
+            return Ok(current);
+        }
+        if let Some(source) = SourcePreference::parse(&input) {
+            return Ok(source);
+        }
+        eprintln!("{}", label_invalid_source(language));
+    }
+}
+
+fn prompt_path(language: Language, label: &str, current: &Path) -> Result<PathBuf> {
+    let prompt = format!(
+        "{} ({}: {}): ",
+        label,
+        label_current(language),
+        current.display()
+    );
+    let input = prompt_line(&prompt)?;
+    if input.trim().is_empty() {
+        Ok(current.to_path_buf())
+    } else {
+        expand_home_path(PathBuf::from(input.trim()))
+    }
+}
+
+fn prompt_positive_usize(language: Language, label: &str, current: usize) -> Result<usize> {
+    loop {
+        let prompt = format!("{} ({}: {}): ", label, label_current(language), current);
+        let input = prompt_line(&prompt)?;
+        if input.trim().is_empty() {
+            return Ok(current);
+        }
+        if let Ok(value) = input.trim().parse::<usize>() {
+            if value > 0 {
+                return Ok(value);
+            }
+        }
+        eprintln!("{}", label_invalid_positive_number(language));
+    }
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn expand_home_path(path: PathBuf) -> Result<PathBuf> {
+    let mut components = path.components();
+    if let Some(Component::Normal(first)) = components.next() {
+        if first == "~" {
+            let mut expanded = home_dir()?;
+            expanded.extend(components);
+            return Ok(expanded);
+        }
+    }
+    Ok(path)
+}
+
+fn print_warnings(language: Language, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!("\n{}:", label_warnings(language));
+    for warning in warnings {
+        eprintln!("- {warning}");
+    }
+}
+
+fn localized_unpriced_model_warnings<'a>(
+    language: Language,
+    events: impl Iterator<Item = &'a crate::model::UsageEvent>,
+) -> Vec<String> {
+    billing::unpriced_models(events)
+        .into_iter()
+        .map(|model| match language {
+            Language::En => {
+                format!("No pricing configured for {model}; omitted from dollar totals")
+            }
+            Language::Zh => format!("未配置 {model} 的价格；已从美元总额中忽略"),
+        })
+        .collect()
+}
+
+fn text(language: Language, en: &'static str, zh: &'static str) -> &'static str {
+    match language {
+        Language::En => en,
+        Language::Zh => zh,
+    }
+}
+
+fn label_config_title(language: Language) -> &'static str {
+    text(language, "tokencheck config", "tokencheck 配置")
+}
+
+fn label_config_file(language: Language) -> &'static str {
+    text(language, "Config file", "配置文件")
+}
+
+fn label_config_keep_hint(language: Language) -> &'static str {
+    text(
+        language,
+        "Press Enter on a blank input to keep and save the shown value.",
+        "直接按 Enter 会保留并保存当前显示的值。",
+    )
+}
+
+fn label_config_saved(language: Language) -> &'static str {
+    text(language, "config saved", "配置已保存")
+}
+
+fn label_config_language(language: Language) -> &'static str {
+    text(language, "Language", "语言")
+}
+
+fn label_config_source(language: Language) -> &'static str {
+    text(language, "Default source", "默认数据来源")
+}
+
+fn label_config_data_file(language: Language) -> &'static str {
+    text(language, "Snapshot data file", "快照数据文件")
+}
+
+fn label_config_limit(language: Language) -> &'static str {
+    text(language, "Default row limit", "默认输出行数")
+}
+
+fn label_config_heatmap_months(language: Language) -> &'static str {
+    text(language, "Default heatmap months", "默认热力图月份数")
+}
+
+fn label_current(language: Language) -> &'static str {
+    text(language, "current", "当前")
+}
+
+fn label_invalid_language(language: Language) -> &'static str {
+    text(
+        language,
+        "Invalid language. Use en or zh.",
+        "无效语言。请输入 en 或 zh。",
+    )
+}
+
+fn label_invalid_source(language: Language) -> &'static str {
+    text(
+        language,
+        "Invalid source. Use all, claude, or codex.",
+        "无效数据来源。请输入 all、claude 或 codex。",
+    )
+}
+
+fn label_invalid_positive_number(language: Language) -> &'static str {
+    text(
+        language,
+        "Invalid number. Enter a positive integer.",
+        "无效数字。请输入正整数。",
+    )
+}
+
+fn label_snapshot_saved(language: Language) -> &'static str {
+    text(language, "snapshot saved", "快照已保存")
+}
+
+fn label_snapshot_unchanged(language: Language) -> &'static str {
+    text(language, "snapshot unchanged", "快照未变化")
+}
+
+fn label_warnings(language: Language) -> &'static str {
+    text(language, "Warnings", "警告")
+}
+
+fn label_summary_title(language: Language) -> &'static str {
+    text(language, "tokencheck summary", "tokencheck 总览")
+}
+
+fn label_sessions_scanned(language: Language) -> &'static str {
+    text(language, "sessions scanned", "扫描会话数")
+}
+
+fn label_sessions_with_usage(language: Language) -> &'static str {
+    text(language, "sessions with usage", "包含用量的会话数")
+}
+
+fn label_projects_seen(language: Language) -> &'static str {
+    text(language, "projects seen", "项目数")
+}
+
+fn label_models_seen(language: Language) -> &'static str {
+    text(language, "models seen", "模型数")
+}
+
+fn label_estimated_cost(language: Language) -> &'static str {
+    text(language, "estimated cost", "估算成本")
+}
+
+fn label_sessions(language: Language) -> &'static str {
+    text(language, "sessions", "会话")
+}
+
+fn label_usage_events(language: Language) -> &'static str {
+    text(language, "usage events", "用量事件")
+}
+
+fn label_usage(language: Language) -> &'static str {
+    text(language, "usage", "用量")
+}
+
+fn label_tools(language: Language) -> &'static str {
+    text(language, "tools", "工具")
+}
+
+fn label_tool_calls(language: Language) -> &'static str {
+    text(language, "tool calls", "工具调用")
+}
+
+fn label_total_tokens(language: Language) -> &'static str {
+    text(language, "total tokens", "总 token")
+}
+
+fn label_source(language: Language) -> &'static str {
+    text(language, "source", "来源")
+}
+
+fn label_input(language: Language) -> &'static str {
+    text(language, "input", "输入")
+}
+
+fn label_cached(language: Language) -> &'static str {
+    text(language, "cached", "缓存")
+}
+
+fn label_cache_create(language: Language) -> &'static str {
+    text(language, "cache_create", "写缓存")
+}
+
+fn label_output(language: Language) -> &'static str {
+    text(language, "output", "输出")
+}
+
+fn label_reasoning(language: Language) -> &'static str {
+    text(language, "reasoning", "推理")
+}
+
+fn label_total(language: Language) -> &'static str {
+    text(language, "total", "总计")
+}
+
+fn label_cost(language: Language) -> &'static str {
+    text(language, "cost", "成本")
+}
+
+fn label_cost_title(language: Language) -> &'static str {
+    text(language, "Cost", "成本")
+}
+
+fn label_date(language: Language) -> &'static str {
+    text(language, "date", "日期")
+}
+
+fn label_project(language: Language) -> &'static str {
+    text(language, "project", "项目")
+}
+
+fn label_projects(language: Language) -> &'static str {
+    text(language, "projects", "项目数")
+}
+
+fn label_model(language: Language) -> &'static str {
+    text(language, "model", "模型")
+}
+
+fn label_tool(language: Language) -> &'static str {
+    text(language, "tool", "工具")
+}
+
+fn label_calls(language: Language) -> &'static str {
+    text(language, "calls", "调用")
+}
+
+fn label_days(language: Language) -> &'static str {
+    text(language, "Days", "天数")
+}
+
+fn label_daily_usage(language: Language) -> &'static str {
+    text(language, "Daily Usage", "每日用量")
+}
+
+fn label_contribution_heatmap(language: Language) -> &'static str {
+    text(language, "Contribution Heatmap", "用量热力图")
+}
+
+fn label_terminal_too_narrow_chart(language: Language) -> &'static str {
+    text(
+        language,
+        "Terminal is too narrow for the chart",
+        "终端太窄，无法显示图表",
+    )
+}
+
+fn label_terminal_too_narrow_heatmap(language: Language) -> &'static str {
+    text(
+        language,
+        "Terminal is too narrow for the heatmap",
+        "终端太窄，无法显示热力图",
+    )
+}
+
+fn label_no_usage_data(language: Language) -> &'static str {
+    text(language, "No usage data.", "没有可用用量数据。")
+}
+
+fn label_max(language: Language) -> &'static str {
+    text(language, "Max", "最大")
+}
+
+fn label_tokens(language: Language) -> &'static str {
+    text(language, "Tokens", "Token")
+}
+
+fn label_less(language: Language) -> &'static str {
+    text(language, "Less", "低")
+}
+
+fn label_more(language: Language) -> &'static str {
+    text(language, "More", "高")
+}
+
+fn label_upgraded(language: Language) -> &'static str {
+    text(language, "upgraded", "已升级")
 }
 
 fn collect_data(filter: SourceFilter, roots: &Roots) -> Result<ReportData> {
@@ -152,7 +611,12 @@ fn report_data(
     Ok(filter_data(data, filter))
 }
 
-fn run_fetch(filter: SourceFilter, home: Option<PathBuf>, data_file: PathBuf) -> Result<()> {
+fn run_fetch(
+    filter: SourceFilter,
+    home: Option<PathBuf>,
+    data_file: PathBuf,
+    language: Language,
+) -> Result<()> {
     let roots = Roots {
         home: home.unwrap_or(home_dir()?),
     };
@@ -166,34 +630,48 @@ fn run_fetch(filter: SourceFilter, home: Option<PathBuf>, data_file: PathBuf) ->
 
     if summary.changed() || !file_exists {
         snapshot::save(&data_file, &existing)?;
-        println!("snapshot saved: {}", data_file.display());
+        println!(
+            "{}: {}",
+            label_snapshot_saved(language),
+            data_file.display()
+        );
     } else {
-        println!("snapshot unchanged: {}", data_file.display());
+        println!(
+            "{}: {}",
+            label_snapshot_unchanged(language),
+            data_file.display()
+        );
     }
-    println!("sessions: {} -> {}", before.sessions, after.sessions);
     println!(
-        "usage events: {} -> {} (+{}, upgraded {})",
+        "{}: {} -> {}",
+        label_sessions(language),
+        before.sessions,
+        after.sessions
+    );
+    println!(
+        "{}: {} -> {} (+{}, {} {})",
+        label_usage_events(language),
         before.usage_events,
         after.usage_events,
         summary.usage_events_added,
+        label_upgraded(language),
         summary.usage_events_upgraded
     );
     println!(
-        "tool calls: {} -> {} (+{})",
-        before.tool_events, after.tool_events, summary.tool_events_added
+        "{}: {} -> {} (+{})",
+        label_tool_calls(language),
+        before.tool_events,
+        after.tool_events,
+        summary.tool_events_added
     );
     println!(
-        "total tokens: {} -> {}",
+        "{}: {} -> {}",
+        label_total_tokens(language),
         format_number(before.total_tokens),
         format_number(after.total_tokens)
     );
 
-    if !warnings.is_empty() {
-        eprintln!("\nWarnings:");
-        for warning in &warnings {
-            eprintln!("- {warning}");
-        }
-    }
+    print_warnings(language, &warnings);
 
     Ok(())
 }
@@ -243,7 +721,7 @@ impl From<&ReportData> for DataCounts {
     }
 }
 
-fn print_summary(data: &ReportData) {
+fn print_summary(data: &ReportData, language: Language) {
     let mut rows = Vec::new();
     let sources = [Source::Claude, Source::Codex];
     for source in sources {
@@ -302,41 +780,57 @@ fn print_summary(data: &ReportData) {
         .filter(|model| *model != "unknown")
         .collect::<BTreeSet<_>>()
         .len();
-    println!("tokencheck summary");
-    println!("sessions scanned: {}", unique_sessions(data, None));
-    println!("sessions with usage: {sessions_with_usage}");
-    println!("projects seen: {projects_seen}");
-    println!("models seen: {models_seen}");
-    println!("usage events: {}", data.usage_events.len());
-    println!("tool calls: {}", data.tool_events.len());
+    println!("{}", label_summary_title(language));
     println!(
-        "total tokens: {}",
+        "{}: {}",
+        label_sessions_scanned(language),
+        unique_sessions(data, None)
+    );
+    println!(
+        "{}: {sessions_with_usage}",
+        label_sessions_with_usage(language)
+    );
+    println!("{}: {projects_seen}", label_projects_seen(language));
+    println!("{}: {models_seen}", label_models_seen(language));
+    println!(
+        "{}: {}",
+        label_usage_events(language),
+        data.usage_events.len()
+    );
+    println!("{}: {}", label_tool_calls(language), data.tool_events.len());
+    println!(
+        "{}: {}",
+        label_total_tokens(language),
         format_number(total_stats.usage.computed_total())
     );
-    println!("estimated cost: {}", format_cost(total_stats.cost));
+    println!(
+        "{}: {}",
+        label_estimated_cost(language),
+        format_cost(total_stats.cost)
+    );
     println!();
     print_table(
         &[
-            "source",
-            "sessions",
-            "usage",
-            "tools",
-            "input",
-            "cached",
-            "cache_create",
-            "output",
-            "reasoning",
-            "total",
-            "cost",
+            label_source(language),
+            label_sessions(language),
+            label_usage(language),
+            label_tools(language),
+            label_input(language),
+            label_cached(language),
+            label_cache_create(language),
+            label_output(language),
+            label_reasoning(language),
+            label_total(language),
+            label_cost(language),
         ],
         &rows,
     );
 }
 
-fn print_days(data: &ReportData, limit: usize, chant: bool) {
+fn print_days(data: &ReportData, limit: usize, chant: bool, language: Language) {
     let rows = daily_usage_rows(data, limit);
     if chant {
-        print_days_histogram(&rows);
+        print_days_histogram(&rows, language);
         return;
     }
 
@@ -359,15 +853,15 @@ fn print_days(data: &ReportData, limit: usize, chant: bool) {
 
     print_table(
         &[
-            "date",
-            "sessions",
-            "input",
-            "cached",
-            "cache_create",
-            "output",
-            "reasoning",
-            "total",
-            "cost",
+            label_date(language),
+            label_sessions(language),
+            label_input(language),
+            label_cached(language),
+            label_cache_create(language),
+            label_output(language),
+            label_reasoning(language),
+            label_total(language),
+            label_cost(language),
         ],
         &rows,
     );
@@ -401,9 +895,9 @@ fn daily_usage_rows(data: &ReportData, limit: usize) -> Vec<DailyUsageRow> {
         .collect()
 }
 
-fn print_days_histogram(rows: &[DailyUsageRow]) {
+fn print_days_histogram(rows: &[DailyUsageRow], language: Language) {
     if rows.is_empty() {
-        println!("No usage data.");
+        println!("{}", label_no_usage_data(language));
         return;
     }
 
@@ -412,8 +906,8 @@ fn print_days_histogram(rows: &[DailyUsageRow]) {
     let visible_rows = visible_histogram_rows(rows, inner_width);
     if visible_rows.is_empty() {
         print_rounded_panel(
-            "Daily Usage",
-            &[dim("Terminal is too narrow for the chart")],
+            label_daily_usage(language),
+            &[dim(label_terminal_too_narrow_chart(language))],
         );
         return;
     }
@@ -440,16 +934,16 @@ fn print_days_histogram(rows: &[DailyUsageRow]) {
     let mut lines = Vec::new();
     lines.push(format!(
         "{} {}   {} {}",
-        dim("Max"),
+        dim(label_max(language)),
         bold_yellow(&format_number(max_usage)),
-        dim("Days"),
+        dim(label_days(language)),
         bold_yellow(&days_label)
     ));
     lines.push(format!(
         "{} {}   {} {}",
-        dim("Tokens"),
+        dim(label_tokens(language)),
         bold_yellow(&format_number(total_tokens)),
-        dim("Cost"),
+        dim(label_cost_title(language)),
         bold_yellow(&format_histogram_cost(total_cost))
     ));
     lines.push(String::new());
@@ -459,9 +953,9 @@ fn print_days_histogram(rows: &[DailyUsageRow]) {
         HISTOGRAM_HEIGHT,
     ));
     lines.push(String::new());
-    lines.push(heatmap_legend_line());
+    lines.push(heatmap_legend_line(language));
 
-    print_rounded_panel("Daily Usage", &lines);
+    print_rounded_panel(label_daily_usage(language), &lines);
 }
 
 fn visible_histogram_rows(rows: &[DailyUsageRow], available_width: usize) -> Vec<DailyUsageRow> {
@@ -539,7 +1033,7 @@ fn histogram_axis_label(level: usize, height: usize, max_usage: u64) -> String {
     }
 }
 
-fn print_heatmap(data: &ReportData, months: usize) {
+fn print_heatmap(data: &ReportData, months: usize, language: Language) {
     let mut usage_by_date: BTreeMap<CivilDate, UsageStats> = BTreeMap::new();
     for event in &data.usage_events {
         let Some(date) = CivilDate::parse(&event.date) else {
@@ -549,7 +1043,7 @@ fn print_heatmap(data: &ReportData, months: usize) {
     }
 
     let Some(latest_date) = usage_by_date.keys().next_back().copied() else {
-        println!("No usage data.");
+        println!("{}", label_no_usage_data(language));
         return;
     };
 
@@ -577,8 +1071,8 @@ fn print_heatmap(data: &ReportData, months: usize) {
     let visible_week_count = max_heatmap_weeks(inner_width).min(week_count);
     if visible_week_count == 0 {
         print_rounded_panel(
-            "Contribution Heatmap",
-            &[dim("Terminal is too narrow for the heatmap")],
+            label_contribution_heatmap(language),
+            &[dim(label_terminal_too_narrow_heatmap(language))],
         );
         return;
     }
@@ -600,7 +1094,7 @@ fn print_heatmap(data: &ReportData, months: usize) {
     let mut lines = Vec::new();
     lines.push(format!(
         "{} {}   {}",
-        dim("Max"),
+        dim(label_max(language)),
         bold_yellow(&format_number(selected_max)),
         bold_yellow(&range_label)
     ));
@@ -622,9 +1116,9 @@ fn print_heatmap(data: &ReportData, months: usize) {
         &usage_by_date,
     ));
     lines.push(String::new());
-    lines.push(heatmap_legend_line());
+    lines.push(heatmap_legend_line(language));
 
-    print_rounded_panel("Contribution Heatmap", &lines);
+    print_rounded_panel(label_contribution_heatmap(language), &lines);
 }
 
 fn max_heatmap_weeks(available_width: usize) -> usize {
@@ -700,7 +1194,7 @@ fn github_heatmap_grid_lines(
     lines
 }
 
-fn print_projects(data: &ReportData, limit: usize) {
+fn print_projects(data: &ReportData, limit: usize, language: Language) {
     let rows = aggregate_usage(
         data,
         |event| (event.source.label().to_string(), event.project.clone()),
@@ -724,21 +1218,21 @@ fn print_projects(data: &ReportData, limit: usize) {
 
     print_table(
         &[
-            "source",
-            "project",
-            "input",
-            "cached",
-            "cache_create",
-            "output",
-            "reasoning",
-            "total",
-            "cost",
+            label_source(language),
+            label_project(language),
+            label_input(language),
+            label_cached(language),
+            label_cache_create(language),
+            label_output(language),
+            label_reasoning(language),
+            label_total(language),
+            label_cost(language),
         ],
         &rows,
     );
 }
 
-fn print_models(data: &ReportData, limit: usize) {
+fn print_models(data: &ReportData, limit: usize, language: Language) {
     let rows = aggregate_usage(
         data,
         |event| (event.source.label().to_string(), event.model.clone()),
@@ -762,21 +1256,21 @@ fn print_models(data: &ReportData, limit: usize) {
 
     print_table(
         &[
-            "source",
-            "model",
-            "input",
-            "cached",
-            "cache_create",
-            "output",
-            "reasoning",
-            "total",
-            "cost",
+            label_source(language),
+            label_model(language),
+            label_input(language),
+            label_cached(language),
+            label_cache_create(language),
+            label_output(language),
+            label_reasoning(language),
+            label_total(language),
+            label_cost(language),
         ],
         &rows,
     );
 }
 
-fn print_tools(data: &ReportData, limit: usize) {
+fn print_tools(data: &ReportData, limit: usize, language: Language) {
     #[derive(Default)]
     struct ToolStats {
         calls: u64,
@@ -810,7 +1304,16 @@ fn print_tools(data: &ReportData, limit: usize) {
         })
         .collect::<Vec<_>>();
 
-    print_table(&["source", "tool", "calls", "days", "projects"], &rows);
+    print_table(
+        &[
+            label_source(language),
+            label_tool(language),
+            label_calls(language),
+            label_days(language),
+            label_projects(language),
+        ],
+        &rows,
+    );
 }
 
 fn aggregate_usage<K, F>(data: &ReportData, key_fn: F, limit: usize) -> Vec<(K, UsageStats)>
@@ -882,7 +1385,7 @@ fn unique_sessions(data: &ReportData, source: Option<Source>) -> usize {
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths = headers
         .iter()
-        .map(|header| header.len())
+        .map(|header| display_width(header))
         .collect::<Vec<_>>();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
@@ -927,10 +1430,33 @@ fn display_width(value: &str) -> usize {
                 }
             }
         } else {
-            width += 1;
+            width += char_display_width(ch);
         }
     }
     width
+}
+
+fn char_display_width(ch: char) -> usize {
+    if ch.is_control() {
+        return 0;
+    }
+    let code = ch as u32;
+    if matches!(
+        code,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 fn histogram_label_row<'a>(
@@ -1050,8 +1576,12 @@ fn truncate_visible(value: &str, width: usize) -> String {
         if visible_width >= width {
             break;
         }
+        let ch_width = char_display_width(ch);
+        if visible_width + ch_width > width {
+            break;
+        }
         out.push(ch);
-        visible_width += 1;
+        visible_width += ch_width;
     }
     if saw_escape {
         out.push_str(ANSI_RESET);
@@ -1170,13 +1700,13 @@ fn heatmap_cell_for_level(level: usize) -> String {
     format!("\x1b[38;5;{color}m██\x1b[0m")
 }
 
-fn heatmap_legend_line() -> String {
-    let mut line = format!("{} ", dim("Less"));
+fn heatmap_legend_line(language: Language) -> String {
+    let mut line = format!("{} ", dim(label_less(language)));
     for level in 0..=4 {
         line.push_str(&heatmap_cell_for_level(level));
     }
     line.push(' ');
-    line.push_str(&dim("More"));
+    line.push_str(&dim(label_more(language)));
     line
 }
 
@@ -1451,6 +1981,7 @@ mod tests {
     fn measures_ansi_styled_display_width() {
         assert_eq!(display_width("\x1b[38;5;46m██\x1b[0m"), 2);
         assert_eq!(display_width("\x1b[2mLess\x1b[0m"), 4);
+        assert_eq!(display_width("配置"), 4);
     }
 
     #[test]
@@ -1458,6 +1989,9 @@ mod tests {
         let value = truncate_visible("\x1b[2mabcdef\x1b[0m", 3);
         assert_eq!(display_width(&value), 3);
         assert!(value.ends_with("\x1b[0m"));
+
+        let value = truncate_visible("配置文件", 5);
+        assert_eq!(value, "配置");
     }
 
     #[test]
