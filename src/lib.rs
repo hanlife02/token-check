@@ -37,52 +37,74 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    #[arg(long, global = true, value_enum)]
+    #[arg(long, global = true, value_enum, help = "Select data source")]
     source: Option<SourceFilter>,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Override the home directory to scan")]
     home: Option<PathBuf>,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Limit rows or chart columns")]
     limit: Option<usize>,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Read only from the JSON snapshot")]
     from_json: bool,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Read or write the JSON snapshot file")]
     data_file: Option<PathBuf>,
 
-    #[arg(long, global = true, value_name = "DATE")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "DATE",
+        help = "Only include report data on or after this date"
+    )]
     since: Option<String>,
 
-    #[arg(long, global = true, value_name = "DATE")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "DATE",
+        help = "Only include report data on or before this date"
+    )]
     until: Option<String>,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    #[command(about = "Configure default language, source, snapshot, and display settings")]
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    #[command(about = "Scan local logs and merge them into the JSON snapshot")]
     Fetch,
+    #[command(about = "Show total usage, cost, and per-source totals")]
     Summary,
+    #[command(about = "Show daily token and cost totals")]
     Days {
-        #[arg(long)]
+        #[arg(long, help = "Render a terminal histogram")]
         chant: bool,
     },
+    #[command(about = "Show a terminal contribution heatmap")]
     Heatmap {
-        #[arg(long)]
+        #[arg(long, help = "Number of recent months to display")]
         months: Option<usize>,
     },
+    #[command(about = "Diagnose config, snapshot, and local data availability")]
+    Doctor,
+    #[command(about = "Rank usage by project path")]
     Projects,
+    #[command(about = "Rank usage and estimated cost by model")]
     Models,
+    #[command(about = "Rank tool call counts by tool name")]
     Tools,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 enum ConfigCommand {
+    #[command(about = "Show the effective configuration")]
     Show,
+    #[command(about = "Delete the configuration file and use defaults")]
     Reset,
 }
 
@@ -122,6 +144,16 @@ impl From<SourceFilter> for SourcePreference {
     }
 }
 
+impl SourceFilter {
+    fn as_str(self) -> &'static str {
+        match self {
+            SourceFilter::All => "all",
+            SourceFilter::Claude => "claude",
+            SourceFilter::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct EffectiveSettings {
     language: Language,
@@ -134,6 +166,28 @@ struct EffectiveSettings {
 struct DateFilter {
     since: Option<CivilDate>,
     until: Option<CivilDate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DoctorRow {
+    check: String,
+    status: DoctorStatus,
+    detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DoctorStatus {
+    Ok,
+    Warn,
+}
+
+impl DoctorStatus {
+    fn label(self, language: Language) -> &'static str {
+        match self {
+            DoctorStatus::Ok => text(language, "ok", "正常"),
+            DoctorStatus::Warn => text(language, "warn", "警告"),
+        }
+    }
 }
 
 impl DateFilter {
@@ -193,23 +247,27 @@ pub fn run() -> Result<()> {
                 .unwrap_or_else(|| app_config.data_file.clone()),
         )?,
     };
-    let date_filter = DateFilter::parse(cli.since.as_deref(), cli.until.as_deref())?;
+    let home = cli.home.clone();
 
     if matches!(command, Command::Fetch) {
         return run_fetch(
             settings.source,
-            cli.home,
-            settings.data_file,
+            home,
+            settings.data_file.clone(),
+            settings.language,
+        );
+    }
+    if matches!(command, Command::Doctor) {
+        return run_doctor(
+            settings.source,
+            home,
+            &settings.data_file,
             settings.language,
         );
     }
 
-    let mut data = report_data(
-        settings.source,
-        cli.home,
-        &settings.data_file,
-        cli.from_json,
-    )?;
+    let date_filter = DateFilter::parse(cli.since.as_deref(), cli.until.as_deref())?;
+    let mut data = report_data(settings.source, home, &settings.data_file, cli.from_json)?;
     apply_date_filter(&mut data, date_filter);
     let shows_cost = command.shows_cost();
 
@@ -223,6 +281,7 @@ pub fn run() -> Result<()> {
             months.unwrap_or(app_config.heatmap_months),
             settings.language,
         ),
+        Command::Doctor => unreachable!("doctor returns before report rendering"),
         Command::Projects => print_projects(&data, settings.limit, settings.language),
         Command::Models => print_models(&data, settings.limit, settings.language),
         Command::Tools => print_tools(&data, settings.limit, settings.language),
@@ -333,6 +392,182 @@ fn reset_config(language: Language) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn run_doctor(
+    filter: SourceFilter,
+    home: Option<PathBuf>,
+    data_file: &Path,
+    language: Language,
+) -> Result<()> {
+    let home = home.unwrap_or(home_dir()?);
+    let roots = Roots { home: home.clone() };
+    let config_path = config::config_path()?;
+    let mut rows = vec![
+        doctor_row(
+            label_config_file(language),
+            true,
+            describe_config_path(&config_path, language),
+        ),
+        doctor_row(
+            label_home_directory(language),
+            home.exists(),
+            describe_path_status(&home, language),
+        ),
+        doctor_row(
+            label_source_filter(language),
+            true,
+            filter.as_str().to_string(),
+        ),
+    ];
+
+    if source_filter_includes(filter, Source::Claude) {
+        let path = roots.claude_projects();
+        rows.push(doctor_row(
+            label_claude_data_dir(language),
+            path.exists(),
+            describe_path_status(&path, language),
+        ));
+    }
+    if source_filter_includes(filter, Source::Codex) {
+        let path = roots.codex_sessions();
+        rows.push(doctor_row(
+            label_codex_data_dir(language),
+            path.exists(),
+            describe_path_status(&path, language),
+        ));
+    }
+
+    let mut snapshot_has_usage = false;
+    if data_file.exists() {
+        match snapshot::load(data_file) {
+            Ok(data) => {
+                let counts = DataCounts::from(&filter_data(data, filter));
+                snapshot_has_usage = counts.usage_events > 0;
+                rows.push(doctor_row(
+                    label_snapshot_file(language),
+                    true,
+                    format!(
+                        "{} ({})",
+                        data_file.display(),
+                        describe_counts(counts, language)
+                    ),
+                ));
+            }
+            Err(err) => rows.push(doctor_row(
+                label_snapshot_file(language),
+                false,
+                format!("{} ({err:#})", data_file.display()),
+            )),
+        }
+    } else {
+        rows.push(doctor_row(
+            label_snapshot_file(language),
+            false,
+            describe_missing_path(data_file, language),
+        ));
+    }
+
+    let live = collect_data(filter, &roots)?;
+    let live_counts = DataCounts::from(&live);
+    rows.push(doctor_row(
+        label_live_scan(language),
+        live_counts.usage_events > 0,
+        describe_counts(live_counts, language),
+    ));
+    rows.push(doctor_row(
+        label_report_ready(language),
+        snapshot_has_usage || live_counts.usage_events > 0,
+        if snapshot_has_usage || live_counts.usage_events > 0 {
+            text(language, "usage data available", "已有可用用量数据").to_string()
+        } else {
+            label_no_usage_data(language).to_string()
+        },
+    ));
+
+    print_doctor_rows(&rows, language);
+    print_warnings(language, &live.warnings);
+    Ok(())
+}
+
+fn doctor_row(check: &str, ok: bool, detail: String) -> DoctorRow {
+    DoctorRow {
+        check: check.to_string(),
+        status: if ok {
+            DoctorStatus::Ok
+        } else {
+            DoctorStatus::Warn
+        },
+        detail,
+    }
+}
+
+fn source_filter_includes(filter: SourceFilter, source: Source) -> bool {
+    matches!(
+        (filter, source),
+        (SourceFilter::All, _)
+            | (SourceFilter::Claude, Source::Claude)
+            | (SourceFilter::Codex, Source::Codex)
+    )
+}
+
+fn describe_path_status(path: &Path, language: Language) -> String {
+    if path.exists() {
+        format!("{} ({})", path.display(), label_exists(language))
+    } else {
+        describe_missing_path(path, language)
+    }
+}
+
+fn describe_config_path(path: &Path, language: Language) -> String {
+    if path.exists() {
+        describe_path_status(path, language)
+    } else {
+        format!(
+            "{} ({})",
+            path.display(),
+            text(language, "missing, using defaults", "不存在，使用默认值")
+        )
+    }
+}
+
+fn describe_missing_path(path: &Path, language: Language) -> String {
+    format!("{} ({})", path.display(), label_missing(language))
+}
+
+fn describe_counts(counts: DataCounts, language: Language) -> String {
+    format!(
+        "{} {}, {} {}, {} {}, {} {}",
+        counts.sessions,
+        label_sessions(language),
+        counts.usage_events,
+        label_usage_events(language),
+        counts.tool_events,
+        label_tool_calls(language),
+        format_number(counts.total_tokens),
+        label_total_tokens(language),
+    )
+}
+
+fn print_doctor_rows(rows: &[DoctorRow], language: Language) {
+    println!("{}", label_doctor_title(language));
+    print_table(
+        &[
+            label_check(language),
+            label_status(language),
+            label_detail(language),
+        ],
+        &rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.check.clone(),
+                    row.status.label(language).to_string(),
+                    row.detail.clone(),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
 }
 
 fn prompt_language(current: Language) -> Result<Language> {
@@ -544,6 +779,62 @@ fn label_config_limit(language: Language) -> &'static str {
 
 fn label_config_heatmap_months(language: Language) -> &'static str {
     text(language, "Default heatmap months", "默认热力图月份数")
+}
+
+fn label_doctor_title(language: Language) -> &'static str {
+    text(language, "tokencheck doctor", "tokencheck 诊断")
+}
+
+fn label_check(language: Language) -> &'static str {
+    text(language, "check", "检查项")
+}
+
+fn label_status(language: Language) -> &'static str {
+    text(language, "status", "状态")
+}
+
+fn label_detail(language: Language) -> &'static str {
+    text(language, "detail", "详情")
+}
+
+fn label_home_directory(language: Language) -> &'static str {
+    text(language, "Home directory", "用户目录")
+}
+
+fn label_source_filter(language: Language) -> &'static str {
+    text(language, "Source filter", "数据来源过滤")
+}
+
+fn label_claude_data_dir(language: Language) -> &'static str {
+    text(
+        language,
+        "Claude Code data directory",
+        "Claude Code 数据目录",
+    )
+}
+
+fn label_codex_data_dir(language: Language) -> &'static str {
+    text(language, "Codex data directory", "Codex 数据目录")
+}
+
+fn label_snapshot_file(language: Language) -> &'static str {
+    text(language, "Snapshot file", "快照文件")
+}
+
+fn label_live_scan(language: Language) -> &'static str {
+    text(language, "Live scan", "实时扫描")
+}
+
+fn label_report_ready(language: Language) -> &'static str {
+    text(language, "Report data", "报表数据")
+}
+
+fn label_exists(language: Language) -> &'static str {
+    text(language, "exists", "存在")
+}
+
+fn label_missing(language: Language) -> &'static str {
+    text(language, "missing", "不存在")
 }
 
 fn label_current(language: Language) -> &'static str {
@@ -2076,10 +2367,10 @@ fn home_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_date_filter, display_width, fit_histogram_label, format_cost, format_dollars,
-        format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
-        max_histogram_columns, parse_date_filter_value, parse_terminal_width, truncate_visible,
-        CivilDate, DateFilter,
+        apply_date_filter, describe_counts, display_width, fit_histogram_label, format_cost,
+        format_dollars, format_number, heatmap_level, histogram_height, localized_warning,
+        max_heatmap_weeks, max_histogram_columns, parse_date_filter_value, parse_terminal_width,
+        source_filter_includes, truncate_visible, CivilDate, DataCounts, DateFilter, SourceFilter,
     };
     use crate::billing::Cost;
     use crate::config::Language;
@@ -2193,6 +2484,35 @@ mod tests {
         assert_eq!(data.usage_events.len(), 1);
         assert_eq!(data.tool_events.len(), 1);
         assert_eq!(data.sessions[0].date, "2026-05-02");
+    }
+
+    #[test]
+    fn source_filters_match_expected_doctor_inputs() {
+        assert!(source_filter_includes(SourceFilter::All, Source::Claude));
+        assert!(source_filter_includes(SourceFilter::All, Source::Codex));
+        assert!(source_filter_includes(SourceFilter::Claude, Source::Claude));
+        assert!(!source_filter_includes(SourceFilter::Claude, Source::Codex));
+        assert!(source_filter_includes(SourceFilter::Codex, Source::Codex));
+        assert!(!source_filter_includes(SourceFilter::Codex, Source::Claude));
+    }
+
+    #[test]
+    fn describes_doctor_counts_compactly() {
+        let counts = DataCounts {
+            sessions: 2,
+            usage_events: 3,
+            tool_events: 4,
+            total_tokens: 12_345,
+        };
+
+        assert_eq!(
+            describe_counts(counts, Language::En),
+            "2 sessions, 3 usage events, 4 tool calls, 12.3k total tokens"
+        );
+        assert_eq!(
+            describe_counts(counts, Language::Zh),
+            "2 会话, 3 用量事件, 4 工具调用, 12.3k 总 token"
+        );
     }
 
     #[test]

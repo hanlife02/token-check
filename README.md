@@ -4,7 +4,7 @@
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.8.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+当前 crate 版本：`0.9.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能概览
 
@@ -18,6 +18,7 @@
 - 将本机扫描结果合并保存为 JSON 快照，避免本机日志缺失、清理或轮转后丢失历史统计。
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
 - 支持 `tkc config` 交互式配置默认数据来源、快照路径、输出语言、默认行数和热力图月份数。
+- 支持 `tkc doctor` 诊断配置、快照文件和本机数据目录是否可用。
 - 支持英文和中文输出。
 
 ## 安装与更新
@@ -81,6 +82,12 @@ tkc fetch
 
 ```bash
 tkc config
+```
+
+诊断当前配置、快照和本机数据目录：
+
+```bash
+tkc doctor
 ```
 
 查看最近 10 天的表格统计：
@@ -160,6 +167,7 @@ $XDG_CONFIG_HOME/tokencheck/config.json
 | `tkc config` | 交互式配置默认行为 | 设置语言、快照路径、默认来源和默认显示数量 |
 | `tkc config show` | 查看当前生效配置 | 检查配置文件路径和默认值 |
 | `tkc config reset` | 删除配置文件并恢复默认值 | 清空本机自定义配置 |
+| `tkc doctor` | 诊断配置、快照和本机数据目录 | 排查安装后没有数据、路径不对或快照不可读 |
 | `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
 | `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
 | `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
@@ -191,7 +199,7 @@ tkc summary --source codex
 
 `--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
 命令行参数会覆盖 `tkc config` 保存的默认值。
-`--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照；这样快照会保持完整，报表可以按需切片查看。
+`--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照，也不影响 `doctor` 诊断；这样快照会保持完整，报表可以按需切片查看。
 
 日期过滤示例：
 
@@ -269,6 +277,32 @@ tkc summary --source codex
 tkc fetch --data-file data/one-off.json
 tkc heatmap --months 6
 ```
+
+### `tkc doctor`
+
+`doctor` 会检查当前环境是否能正常产出报表。它不会写入快照，也不会修改配置。
+
+```bash
+tkc doctor
+tkc doctor --source codex
+tkc doctor --home /Users/yourname
+tkc doctor --data-file data/workstation.json
+```
+
+诊断项包括：
+
+| 检查项 | 含义 |
+| --- | --- |
+| `Config file` | 当前配置文件路径是否存在；不存在时会使用内置默认值。 |
+| `Home directory` | 实时扫描使用的 home 目录是否存在。 |
+| `Source filter` | 当前生效的数据来源过滤：`all`、`claude` 或 `codex`。 |
+| `Claude Code data directory` | 是否能找到 `$HOME/.claude/projects`。 |
+| `Codex data directory` | 是否能找到 `$HOME/.codex/sessions`。 |
+| `Snapshot file` | 配置或命令行指定的 JSON 快照是否存在且可读取。 |
+| `Live scan` | 实时扫描当前本机日志后得到的 session、usage、tool 和 token 计数。 |
+| `Report data` | 当前配置下是否已经有可用 usage 数据。 |
+
+如果你安装后运行 `tkc` 没有数据，优先运行 `tkc doctor`。常见原因是 Claude/Codex 日志目录不存在、`--home` 指错目录、只配置了某一个 `source`，或者快照文件还没有通过 `tkc fetch` 创建。
 
 ### `tkc` / `tkc summary`
 
