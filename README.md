@@ -1,8 +1,10 @@
 # tokencheck
 
-`tokencheck` 是一个本地命令行工具，用来统计本机 Claude Code 和 Codex 的使用情况。短命令名是 `tkc`。
+`tokencheck` 是一个本地优先的 Rust 命令行工具，用来统计本机 Claude Code 和 Codex 的使用情况。短命令名是 `tkc`。
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
+
+当前 crate 版本：`0.6.1`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能
 
@@ -16,7 +18,32 @@
 - 将本机扫描结果合并保存为当前目录下的 JSON 快照，避免本机日志缺失时丢失历史统计。
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
 
+## 项目结构
+
+```text
+src/
+├── billing.rs       # 模型价格匹配、cache 计费口径、成本估算
+├── claude_code/     # Claude Code JSONL 数据读取
+├── codex/           # Codex sessions JSONL 数据读取
+├── lib.rs           # CLI、命令分发、聚合、终端渲染
+├── model.rs         # 共享数据模型
+├── snapshot.rs      # JSON 快照读写、去重、合并
+└── bin/
+    ├── tkc.rs
+    └── tokencheck.rs
+```
+
+核心数据流是：读取本机日志或 JSON 快照，归一化为 `ReportData`，按命令维度聚合，再输出表格、柱状图、热力图或成本估算。
+
 ## 安装
+
+从 crates.io 安装：
+
+```bash
+cargo install ethan-tkc
+```
+
+说明：`tkc` 这个 crate 名称已经被其他项目占用，Cargo 也不支持 `ethan@tkc` 这样的 scoped 包名，因此本项目发布包名使用 `ethan-tkc`，二进制命令仍然是 `tkc`。
 
 在项目根目录执行：
 
@@ -146,11 +173,11 @@ tkc days --limit 30
 tkc days --chant
 ```
 
-加上 `--chant` 时会用 Tokscale 风格的圆角面板和竖直彩色柱状图展示每天的 total tokens。
+加上 `--chant` 时会用 Tokscale 风格的圆角面板和竖直彩色柱状图展示每天的 total tokens。图表会读取终端宽度并自动减少可显示日期，避免窄终端下边框错位。
 
 ### `heatmap`
 
-按日聚合 total tokens，并输出 Tokscale 风格的周历热力图。横向是周，纵向是星期，绿色色块越亮表示当天使用量越高。
+按日聚合 total tokens，并输出 Tokscale 风格的周历热力图。横向是周，纵向是星期，绿色色块越亮表示当天使用量越高。热力图会根据终端宽度裁剪可显示周数。
 
 ```bash
 tkc heatmap
@@ -258,6 +285,18 @@ Codex：
 
 当前版本不默认扫描 `~/.codex/log/codex-tui.log`，因为该文件可能非常大，且包含更细的运行日志。
 
+## 数据流
+
+报表命令默认会扫描当前 `$HOME` 下的 Claude Code 和 Codex 数据。如果当前目录存在 `data/tokencheck.json`，会把快照和实时扫描结果合并后展示；这可以在源日志被清理或轮转后继续保留历史统计。
+
+```text
+Claude/Codex JSONL -> collector -> ReportData
+data/tokencheck.json -> snapshot loader -> ReportData
+ReportData -> filter/source merge -> command aggregation -> terminal output
+```
+
+`--from-json` 会跳过实时扫描，只读取指定 JSON 快照。`fetch` 会把当前扫描结果合并进快照文件，而不是覆盖历史。
+
 ## 统计口径
 
 Claude Code：
@@ -295,6 +334,42 @@ Codex：
 
 当前命令只展示聚合后的元数据和计数。
 
+## 已知限制
+
+- 模型价格是内置静态配置，供应商价格变化后需要更新代码。
+- 成本是按文本 token 的估算值，不等同于实际账单。
+- 第三方代理模型名可能不等同于官方模型名，只能按已知别名匹配。
+- `heatmap` 只展示 token 强度，不展示成本。
+- 当前还没有 `--since` / `--until` 日期过滤参数。
+
+## 发布流程
+
+项目包含 GitHub Actions workflow：`.github/workflows/cargo-publish.yml`。
+
+触发方式：
+
+- 推送到 `main`，且本项目源码、manifest、README、LICENSE 或 workflow 有变化。
+- 手动运行 `workflow_dispatch`。
+
+发布步骤：
+
+1. 读取 `Cargo.toml` 中的 package name 和 version。
+2. 运行 `cargo fmt --all -- --check`。
+3. 运行 `cargo clippy --all-targets -- -D warnings`。
+4. 运行 `cargo test`。
+5. 运行 `cargo package`。
+6. 查询 crates.io 是否已有相同 package/version。
+7. 如果版本尚未发布，则执行 `cargo publish`。
+8. 如果版本已经存在，则跳过发布。
+
+首次启用前，需要在 GitHub 仓库的 Actions secrets 中配置：
+
+```text
+CARGO_REGISTRY_TOKEN
+```
+
+这个 token 来自 crates.io 账户设置。之后每次要发布新包，需要先提升 `Cargo.toml` 和 `Cargo.lock` 中的版本号，再推送到 `main`。crates.io 不允许覆盖已经发布过的同一版本。
+
 ## 开发验证
 
 提交前建议运行：
@@ -310,6 +385,8 @@ cargo test
 ```bash
 cargo run --bin tkc -- summary --limit 5
 cargo run --bin tkc -- days --limit 5
+cargo run --bin tkc -- days --from-json --limit 20 --chant
+cargo run --bin tkc -- heatmap --from-json --months 12
 cargo run --bin tkc -- projects --limit 5
 cargo run --bin tkc -- models --limit 5
 cargo run --bin tkc -- tools --limit 5

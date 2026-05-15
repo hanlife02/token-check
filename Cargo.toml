@@ -1,7 +1,17 @@
 [package]
-name = "tokencheck"
-version = "0.6.0"
+name = "ethan-tkc"
+version = "0.6.1"
 edition = "2021"
+description = "Local Claude Code and Codex usage statistics CLI"
+license = "MIT"
+repository = "https://github.com/hanlife02/token-check"
+readme = "README.md"
+keywords = ["cli", "tokens", "usage", "codex", "claude"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "tokencheck"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
