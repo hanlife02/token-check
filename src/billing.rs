@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn only_warns_for_models_without_configured_prices() {
-        let events = vec![
+        let events = [
             event(
                 Source::Claude,
                 "deepseek-v4-pro",
