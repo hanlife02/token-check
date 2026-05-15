@@ -9,12 +9,13 @@ pub mod snapshot;
 
 use crate::config::{AppConfig, Language, SourcePreference};
 use crate::model::{ReportData, Roots, Source, Usage};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Width};
 
 const DEFAULT_TERMINAL_WIDTH: usize = 100;
@@ -31,6 +32,7 @@ const ANSI_DIM: &str = "\x1b[2m";
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
 #[command(about = "Local Claude Code and Codex usage stats")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -49,11 +51,20 @@ struct Cli {
 
     #[arg(long, global = true)]
     data_file: Option<PathBuf>,
+
+    #[arg(long, global = true, value_name = "DATE")]
+    since: Option<String>,
+
+    #[arg(long, global = true, value_name = "DATE")]
+    until: Option<String>,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
-    Config,
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
     Fetch,
     Summary,
     Days {
@@ -67,6 +78,12 @@ enum Command {
     Projects,
     Models,
     Tools,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum ConfigCommand {
+    Show,
+    Reset,
 }
 
 impl Command {
@@ -113,13 +130,59 @@ struct EffectiveSettings {
     data_file: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DateFilter {
+    since: Option<CivilDate>,
+    until: Option<CivilDate>,
+}
+
+impl DateFilter {
+    fn parse(since: Option<&str>, until: Option<&str>) -> Result<Option<Self>> {
+        if since.is_none() && until.is_none() {
+            return Ok(None);
+        }
+
+        let today = today_utc()?;
+        let since = since
+            .map(|value| parse_date_filter_value(value, today))
+            .transpose()?;
+        let until = until
+            .map(|value| parse_date_filter_value(value, today))
+            .transpose()?;
+
+        if let (Some(since), Some(until)) = (since, until) {
+            if since > until {
+                return Err(anyhow!(
+                    "--since must be earlier than or equal to --until (got {since} > {until})"
+                ));
+            }
+        }
+
+        Ok(Some(Self { since, until }))
+    }
+
+    fn contains(self, date: &str) -> bool {
+        let Some(date) = CivilDate::parse(date) else {
+            return false;
+        };
+        if self.since.is_some_and(|since| date < since) {
+            return false;
+        }
+        if self.until.is_some_and(|until| date > until) {
+            return false;
+        }
+        true
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Summary);
     let app_config = config::load_or_default()?;
-    if matches!(command, Command::Config) {
-        return run_config(app_config);
-    }
+    let command = match command {
+        Command::Config { command } => return run_config(app_config, command),
+        command => command,
+    };
 
     let settings = EffectiveSettings {
         language: app_config.language,
@@ -130,6 +193,7 @@ pub fn run() -> Result<()> {
                 .unwrap_or_else(|| app_config.data_file.clone()),
         )?,
     };
+    let date_filter = DateFilter::parse(cli.since.as_deref(), cli.until.as_deref())?;
 
     if matches!(command, Command::Fetch) {
         return run_fetch(
@@ -140,16 +204,17 @@ pub fn run() -> Result<()> {
         );
     }
 
-    let data = report_data(
+    let mut data = report_data(
         settings.source,
         cli.home,
         &settings.data_file,
         cli.from_json,
     )?;
+    apply_date_filter(&mut data, date_filter);
     let shows_cost = command.shows_cost();
 
     match command {
-        Command::Config => unreachable!("config returns before report rendering"),
+        Command::Config { .. } => unreachable!("config returns before report rendering"),
         Command::Fetch => unreachable!("fetch returns before report rendering"),
         Command::Summary => print_summary(&data, settings.language),
         Command::Days { chant } => print_days(&data, settings.limit, chant, settings.language),
@@ -175,7 +240,15 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_config(mut app_config: AppConfig) -> Result<()> {
+fn run_config(app_config: AppConfig, command: Option<ConfigCommand>) -> Result<()> {
+    match command {
+        Some(ConfigCommand::Show) => print_config(app_config),
+        Some(ConfigCommand::Reset) => reset_config(app_config.language),
+        None => run_config_interactive(app_config),
+    }
+}
+
+fn run_config_interactive(mut app_config: AppConfig) -> Result<()> {
     let config_path = config::config_path()?;
     println!("{}", label_config_title(app_config.language));
     println!(
@@ -211,6 +284,54 @@ fn run_config(mut app_config: AppConfig) -> Result<()> {
         label_config_saved(app_config.language),
         saved_path.display()
     );
+    Ok(())
+}
+
+fn print_config(app_config: AppConfig) -> Result<()> {
+    let config_path = config::config_path()?;
+    let language = app_config.language;
+    println!("{}", label_config_title(language));
+    println!("{}: {}", label_config_file(language), config_path.display());
+    println!(
+        "{}: {}",
+        label_config_status(language),
+        if config_path.exists() {
+            label_configured(language)
+        } else {
+            label_defaults(language)
+        }
+    );
+    println!("{}: {}", label_config_language(language), language.as_str());
+    println!(
+        "{}: {}",
+        label_config_source(language),
+        app_config.source.as_str()
+    );
+    println!(
+        "{}: {}",
+        label_config_data_file(language),
+        app_config.data_file.display()
+    );
+    println!("{}: {}", label_config_limit(language), app_config.limit);
+    println!(
+        "{}: {}",
+        label_config_heatmap_months(language),
+        app_config.heatmap_months
+    );
+    Ok(())
+}
+
+fn reset_config(language: Language) -> Result<()> {
+    let (path, removed) = config::reset()?;
+    if removed {
+        println!("{}: {}", label_config_reset(language), path.display());
+    } else {
+        println!(
+            "{}: {}",
+            label_config_already_default(language),
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -309,8 +430,38 @@ fn print_warnings(language: Language, warnings: &[String]) {
     }
     eprintln!("\n{}:", label_warnings(language));
     for warning in warnings {
-        eprintln!("- {warning}");
+        eprintln!("- {}", localized_warning(language, warning));
     }
+}
+
+fn localized_warning(language: Language, warning: &str) -> String {
+    if matches!(language, Language::En) {
+        return warning.to_string();
+    }
+
+    if let Some(path) = warning.strip_prefix("Claude Code data directory not found: ") {
+        return format!("未找到 Claude Code 数据目录: {path}");
+    }
+    if let Some(path) = warning.strip_prefix("Codex data directory not found: ") {
+        return format!("未找到 Codex 数据目录: {path}");
+    }
+    if let Some(err) = warning.strip_prefix("Failed to walk Claude Code data: ") {
+        return format!("遍历 Claude Code 数据失败: {err}");
+    }
+    if let Some(err) = warning.strip_prefix("Failed to walk Codex data: ") {
+        return format!("遍历 Codex 数据失败: {err}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read Claude Code file ") {
+        return format!("读取 Claude Code 文件失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read Codex file ") {
+        return format!("读取 Codex 文件失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Invalid JSON in ") {
+        return format!("无效 JSON: {rest}");
+    }
+
+    warning.to_string()
 }
 
 fn localized_unpriced_model_warnings<'a>(
@@ -353,6 +504,26 @@ fn label_config_keep_hint(language: Language) -> &'static str {
 
 fn label_config_saved(language: Language) -> &'static str {
     text(language, "config saved", "配置已保存")
+}
+
+fn label_config_reset(language: Language) -> &'static str {
+    text(language, "config reset", "配置已重置")
+}
+
+fn label_config_already_default(language: Language) -> &'static str {
+    text(language, "config already default", "配置已经是默认值")
+}
+
+fn label_config_status(language: Language) -> &'static str {
+    text(language, "Status", "状态")
+}
+
+fn label_configured(language: Language) -> &'static str {
+    text(language, "configured", "已配置")
+}
+
+fn label_defaults(language: Language) -> &'static str {
+    text(language, "defaults", "默认值")
 }
 
 fn label_config_language(language: Language) -> &'static str {
@@ -687,6 +858,18 @@ fn filter_data(mut data: ReportData, filter: SourceFilter) -> ReportData {
     data.tool_events
         .retain(|event| source_matches(event.source, filter));
     data
+}
+
+fn apply_date_filter(data: &mut ReportData, filter: Option<DateFilter>) {
+    let Some(filter) = filter else {
+        return;
+    };
+    data.sessions
+        .retain(|session| filter.contains(&session.date));
+    data.usage_events
+        .retain(|event| filter.contains(&event.date));
+    data.tool_events
+        .retain(|event| filter.contains(&event.date));
 }
 
 fn source_matches(source: Source, filter: SourceFilter) -> bool {
@@ -1633,6 +1816,9 @@ struct CivilDate {
 
 impl CivilDate {
     fn parse(value: &str) -> Option<Self> {
+        if value.len() != 10 {
+            return None;
+        }
         let year = value.get(0..4)?.parse::<i32>().ok()?;
         let month = value.get(5..7)?.parse::<u8>().ok()?;
         let day = value.get(8..10)?.parse::<u8>().ok()?;
@@ -1667,6 +1853,43 @@ impl CivilDate {
         let days = days_from_civil(self.year, self.month, self.day);
         (days + 4).rem_euclid(7) as usize
     }
+}
+
+impl std::fmt::Display for CivilDate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:04}-{:02}-{:02}",
+            self.year, self.month, self.day
+        )
+    }
+}
+
+fn parse_date_filter_value(value: &str, today: CivilDate) -> Result<CivilDate> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("today") {
+        return Ok(today);
+    }
+    if let Some(days) = value.strip_suffix('d').or_else(|| value.strip_suffix('D')) {
+        let days = days
+            .parse::<i64>()
+            .with_context(|| format!("parse relative date filter {value:?}"))?;
+        if days < 0 {
+            return Err(anyhow!("relative date filters must be non-negative"));
+        }
+        return Ok(today.add_days(-days));
+    }
+    CivilDate::parse(value).ok_or_else(|| {
+        anyhow!("invalid date filter {value:?}; use YYYY-MM-DD, today, or a relative value like 7d")
+    })
+}
+
+fn today_utc() -> Result<CivilDate> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("system time is before Unix epoch: {err}"))?;
+    let days = (duration.as_secs() / 86_400) as i64;
+    Ok(civil_from_days(days))
 }
 
 fn heatmap_cell(usage: u64, max_usage: u64) -> String {
@@ -1853,11 +2076,14 @@ fn home_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, fit_histogram_label, format_cost, format_dollars, format_number,
-        heatmap_level, histogram_height, max_heatmap_weeks, max_histogram_columns,
-        parse_terminal_width, truncate_visible, CivilDate,
+        apply_date_filter, display_width, fit_histogram_label, format_cost, format_dollars,
+        format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
+        max_histogram_columns, parse_date_filter_value, parse_terminal_width, truncate_visible,
+        CivilDate, DateFilter,
     };
     use crate::billing::Cost;
+    use crate::config::Language;
+    use crate::model::{ReportData, SessionMeta, Source, ToolEvent, Usage, UsageEvent};
 
     #[test]
     fn formats_numbers_with_compact_units() {
@@ -1901,6 +2127,7 @@ mod tests {
             })
         );
         assert_eq!(CivilDate::parse("2026-02-29"), None);
+        assert_eq!(CivilDate::parse("2026-05-13-extra"), None);
         assert_eq!(
             CivilDate::parse("2024-02-29"),
             Some(CivilDate {
@@ -1909,6 +2136,63 @@ mod tests {
                 day: 29
             })
         );
+    }
+
+    #[test]
+    fn parses_absolute_and_relative_date_filters() {
+        let today = CivilDate::parse("2026-05-16").unwrap();
+        assert_eq!(
+            parse_date_filter_value("2026-05-01", today).unwrap(),
+            CivilDate::parse("2026-05-01").unwrap()
+        );
+        assert_eq!(
+            parse_date_filter_value("today", today).unwrap(),
+            CivilDate::parse("2026-05-16").unwrap()
+        );
+        assert_eq!(
+            parse_date_filter_value("7d", today).unwrap(),
+            CivilDate::parse("2026-05-09").unwrap()
+        );
+        assert!(parse_date_filter_value("bad", today).is_err());
+    }
+
+    #[test]
+    fn rejects_inverted_date_filters() {
+        let filter = DateFilter::parse(Some("2026-05-10"), Some("2026-05-01"));
+        assert!(filter.is_err());
+    }
+
+    #[test]
+    fn filters_report_data_by_inclusive_dates() {
+        let mut data = ReportData {
+            sessions: vec![
+                session("2026-05-01"),
+                session("2026-05-02"),
+                session("2026-05-03"),
+            ],
+            usage_events: vec![
+                usage_event("2026-05-01"),
+                usage_event("2026-05-02"),
+                usage_event("2026-05-03"),
+            ],
+            tool_events: vec![
+                tool_event("2026-05-01"),
+                tool_event("2026-05-02"),
+                tool_event("2026-05-03"),
+            ],
+            warnings: Vec::new(),
+        };
+        let filter = DateFilter {
+            since: Some(CivilDate::parse("2026-05-02").unwrap()),
+            until: Some(CivilDate::parse("2026-05-02").unwrap()),
+        };
+
+        apply_date_filter(&mut data, Some(filter));
+
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.usage_events.len(), 1);
+        assert_eq!(data.tool_events.len(), 1);
+        assert_eq!(data.sessions[0].date, "2026-05-02");
     }
 
     #[test]
@@ -2005,5 +2289,55 @@ mod tests {
         assert_eq!(parse_terminal_width("80\n"), Some(80));
         assert_eq!(parse_terminal_width("0"), None);
         assert_eq!(parse_terminal_width("wide"), None);
+    }
+
+    #[test]
+    fn localizes_known_collector_warnings() {
+        assert_eq!(
+            localized_warning(
+                Language::Zh,
+                "Codex data directory not found: /tmp/.codex/sessions"
+            ),
+            "未找到 Codex 数据目录: /tmp/.codex/sessions"
+        );
+        assert_eq!(
+            localized_warning(Language::En, "Failed to walk Claude Code data: denied"),
+            "Failed to walk Claude Code data: denied"
+        );
+    }
+
+    fn session(date: &str) -> SessionMeta {
+        SessionMeta {
+            source: Source::Codex,
+            session_id: format!("session-{date}"),
+            date: date.to_string(),
+            project: String::from("/tmp/project"),
+            model: String::from("model"),
+        }
+    }
+
+    fn usage_event(date: &str) -> UsageEvent {
+        UsageEvent {
+            source: Source::Codex,
+            event_id: format!("usage-{date}"),
+            session_id: format!("session-{date}"),
+            date: date.to_string(),
+            project: String::from("/tmp/project"),
+            model: String::from("model"),
+            usage: Usage {
+                total: 1,
+                ..Usage::default()
+            },
+        }
+    }
+
+    fn tool_event(date: &str) -> ToolEvent {
+        ToolEvent {
+            source: Source::Codex,
+            event_id: format!("tool-{date}"),
+            date: date.to_string(),
+            project: String::from("/tmp/project"),
+            tool: String::from("shell"),
+        }
     }
 }

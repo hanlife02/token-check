@@ -101,6 +101,15 @@ pub fn save(config: &AppConfig) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn reset() -> Result<(PathBuf, bool)> {
+    let path = config_path()?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        return Ok((path, true));
+    }
+    Ok((path, false))
+}
+
 pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TOKENCHECK_CONFIG") {
         return Ok(PathBuf::from(path));

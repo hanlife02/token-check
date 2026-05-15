@@ -4,7 +4,7 @@
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.7.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+当前 crate 版本：`0.8.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能概览
 
@@ -33,6 +33,7 @@ cargo install ethan-tkc
 ```bash
 tkc --help
 tokencheck --help
+tkc --version
 ```
 
 更新到 crates.io 上的最新版本：
@@ -157,6 +158,8 @@ $XDG_CONFIG_HOME/tokencheck/config.json
 | --- | --- | --- |
 | `tkc` | 默认执行 `summary` | 快速查看总览 |
 | `tkc config` | 交互式配置默认行为 | 设置语言、快照路径、默认来源和默认显示数量 |
+| `tkc config show` | 查看当前生效配置 | 检查配置文件路径和默认值 |
+| `tkc config reset` | 删除配置文件并恢复默认值 | 清空本机自定义配置 |
 | `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
 | `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
 | `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
@@ -182,10 +185,24 @@ tkc summary --source codex
 | `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
 | `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
 | `--data-file <PATH>` | 配置值，初始为 `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
+| `--since <DATE>` | 无 | 只统计该日期及之后的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
+| `--until <DATE>` | 无 | 只统计该日期及之前的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
 | `-h`, `--help` | - | 打印命令帮助。 |
 
 `--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
 命令行参数会覆盖 `tkc config` 保存的默认值。
+`--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照；这样快照会保持完整，报表可以按需切片查看。
+
+日期过滤示例：
+
+```bash
+tkc summary --since 2026-05-01
+tkc days --since 30d
+tkc models --since 7d --until today
+tkc projects --from-json --since 2026-01-01 --until 2026-03-31
+```
+
+相对日期按当前日期向前计算，例如 `7d` 表示 7 天前的日期。过滤区间是闭区间，包含起止日期。
 
 ## 命令详解
 
@@ -195,6 +212,8 @@ tkc summary --source codex
 
 ```bash
 tkc config
+tkc config show
+tkc config reset
 ```
 
 可配置项：
@@ -231,6 +250,18 @@ tkc summary
 tkc heatmap
 ```
 
+查看当前生效配置：
+
+```bash
+tkc config show
+```
+
+删除配置文件并恢复内置默认值：
+
+```bash
+tkc config reset
+```
+
 仍然可以临时覆盖：
 
 ```bash
@@ -263,6 +294,7 @@ tkc summary
 tkc summary --source claude
 tkc summary --source codex
 tkc summary --from-json
+tkc summary --since 30d
 ```
 
 输出顶部字段：
@@ -324,6 +356,7 @@ tkc days
 tkc days --limit 7
 tkc days --source codex --limit 30
 tkc days --from-json --limit 90
+tkc days --since 2026-05-01 --until today
 ```
 
 表格字段：
@@ -389,6 +422,7 @@ tkc projects
 tkc projects --limit 10
 tkc projects --source claude
 tkc projects --from-json --data-file data/tokencheck.json
+tkc projects --since 30d
 ```
 
 这个命令适合找出最耗 token 的项目。输出字段和 `days` 类似，但第一列是 `source`，第二列是 `project`。
@@ -408,6 +442,7 @@ tkc models
 tkc models --limit 20
 tkc models --source codex
 tkc models --from-json
+tkc models --since 7d
 ```
 
 这个命令适合分析：
@@ -427,6 +462,7 @@ tkc tools
 tkc tools --limit 50
 tkc tools --source claude
 tkc tools --from-json
+tkc tools --since 2026-05-01
 ```
 
 输出字段：
@@ -539,8 +575,6 @@ tkc days --from-json --limit 30
 - 成本是按文本 token 的估算值，不等同于实际账单。
 - 第三方代理模型名可能不等同于官方模型名，只能按已知别名匹配。
 - `heatmap` 只展示 token 强度，不展示成本。
-- 当前还没有 `--since` / `--until` 日期过滤参数。
-- 当前还没有 `--version` 参数；用 `cargo install --list` 查看已安装 crate 版本。
 
 ## 项目结构
 
