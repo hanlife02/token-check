@@ -1,0 +1,7 @@
+interface:
+  display_name: "Tokencheck"
+  short_description: "Operate tkc token usage reports"
+  default_prompt: "Use $tokencheck to configure tkc and troubleshoot local token usage reports."
+
+policy:
+  allow_implicit_invocation: true

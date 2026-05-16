@@ -1,31 +1,52 @@
 # tokencheck
 
-`tokencheck` 是一个本地优先的 Rust 命令行工具，用来统计本机 Claude Code 和 Codex 的使用情况。短命令名是 `tkc`，完整命令名是 `tokencheck`。
+`tokencheck` 是一个本地优先的 Rust 命令行工具，用来统计本机 Claude Code 和 Codex 的 token 使用情况、工具调用、项目分布、模型分布和估算成本。
+
+- crates.io 包名：`ethan-tkc`
+- 安装后命令：`tkc`、`tokencheck`
+- 当前版本：`0.11.0`
+- License：MIT
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.11.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+## 目录
+
+- [功能概览](#功能概览)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [配置](#配置)
+- [Codex Skill](#codex-skill)
+- [Obsidian 集成](#obsidian-集成)
+- [命令参考](#命令参考)
+- [数据与快照](#数据与快照)
+- [计费](#计费)
+- [隐私边界](#隐私边界)
+- [已知限制](#已知限制)
+- [开发](#开发)
+- [发布](#发布)
+- [License](#license)
 
 ## 功能概览
 
 - 统计 Claude Code 和 Codex 的总 token 使用量。
-- 按日期查看 token 趋势，并可用 `days --chant` 输出终端柱状图。
-- 按日期使用量生成终端热力图。
-- 按项目路径查看使用排行。
-- 按模型查看 token 分布。
+- 按日期、项目、模型和工具名聚合使用情况。
+- 用 `tkc days --chant` 输出 Tokscale 风格终端柱状图。
+- 用 `tkc heatmap` 输出终端周历热力图。
 - 按模型价格估算每日、项目、模型和总美元成本。
-- 支持自定义模型价格文件，用来覆盖或补充内置价格。
-- 按工具名查看调用次数。
-- 将本机扫描结果合并保存为 JSON 快照，避免本机日志缺失、清理或轮转后丢失历史统计。
-- 支持只看 Claude Code、只看 Codex，或同时统计两者。
-- 支持 `tkc config` 交互式配置默认数据来源、快照路径、输出语言、默认行数和热力图月份数。
-- 支持 `tkc doctor` 诊断配置、快照文件和本机数据目录是否可用。
-- 支持 `tkc obsidian` 按配置生成 Obsidian Dataview Dashboard。
+- 支持自定义模型价格文件，覆盖或补充内置价格。
+- 支持 JSON 快照，避免本机日志清理后丢失历史统计。
+- 支持 `all`、`claude`、`codex` 三种数据来源过滤。
+- 支持 `--since`、`--until` 按日期过滤报表。
+- 支持 `tkc config` 交互式配置默认行为。
+- 支持 `tkc doctor` 诊断配置、快照和本机数据目录。
+- 支持 `tkc obsidian` 生成 Obsidian DataviewJS Dashboard。
 - 支持英文和中文输出。
 
-## 安装与更新
+## 安装
 
-从 crates.io 安装：
+### 从 crates.io 安装
+
+需要本机已经安装 Rust 和 Cargo。
 
 ```bash
 cargo install ethan-tkc
@@ -39,7 +60,7 @@ tokencheck --help
 tkc --version
 ```
 
-更新到 crates.io 上的最新版本：
+### 更新
 
 ```bash
 cargo install ethan-tkc --force
@@ -51,6 +72,8 @@ cargo install ethan-tkc --force
 cargo uninstall tokencheck
 cargo install ethan-tkc
 ```
+
+### 从源码运行
 
 开发目录内临时运行：
 
@@ -74,7 +97,7 @@ tkc
 tkc summary
 ```
 
-保存或更新当前目录下的 JSON 快照：
+保存或更新 JSON 快照：
 
 ```bash
 tkc fetch
@@ -90,13 +113,6 @@ tkc config
 
 ```bash
 tkc doctor
-```
-
-生成或更新 Obsidian Dashboard：
-
-```bash
-tkc obsidian
-tkc obsidian --fetch
 ```
 
 查看最近 10 天的表格统计：
@@ -138,23 +154,15 @@ tkc fetch --data-file data/workstation.json
 tkc summary --from-json --data-file data/workstation.json
 ```
 
-## 工作方式
+## 配置
 
-报表命令默认会做两件事：
+`tkc config` 会在终端中一步一步询问配置项，并保存为 JSON 配置文件。每一步直接按 Enter 会保留当前显示的值；如果之前没有配置过，则使用内置默认值并保存。
 
-1. 读取 `tkc config` 保存的配置；如果没有配置文件，则使用内置默认值。
-2. 扫描当前用户 `$HOME` 下的 Claude Code 和 Codex 本地数据。
-3. 如果配置的快照文件存在，默认是 `data/tokencheck.json`，把快照数据和实时扫描结果合并后展示。
-
-这样可以保留历史统计：即使 Claude Code 或 Codex 的原始日志后续被清理，只要你之前运行过 `tkc fetch`，快照中的旧数据仍然会参与报表。
-
-```text
-Claude/Codex JSONL -> collector -> ReportData
-data/tokencheck.json -> snapshot loader -> ReportData
-ReportData -> source filter -> command aggregation -> terminal output
+```bash
+tkc config
+tkc config show
+tkc config reset
 ```
-
-`fetch` 是唯一会写入快照的命令。其他报表命令只读取和展示数据。
 
 默认配置文件位置：
 
@@ -166,74 +174,6 @@ ReportData -> source filter -> command aggregation -> terminal output
 
 ```text
 $XDG_CONFIG_HOME/tokencheck/config.json
-```
-
-## 命令一览
-
-| 命令 | 作用 | 常用场景 |
-| --- | --- | --- |
-| `tkc` | 默认执行 `summary` | 快速查看总览 |
-| `tkc config` | 交互式配置默认行为 | 设置语言、快照路径、默认来源和默认显示数量 |
-| `tkc config show` | 查看当前生效配置 | 检查配置文件路径和默认值 |
-| `tkc config reset` | 删除配置文件并恢复默认值 | 清空本机自定义配置 |
-| `tkc doctor` | 诊断配置、快照和本机数据目录 | 排查安装后没有数据、路径不对或快照不可读 |
-| `tkc obsidian` | 生成 Obsidian Dataview Dashboard | 在 Obsidian 中查看 token 用量报表 |
-| `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
-| `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
-| `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
-| `tkc days --chant` | 用 Tokscale 风格柱状图展示每日 token | 在终端中快速看趋势 |
-| `tkc heatmap` | 用周历热力图展示每日 token 强度 | 看长期使用节奏 |
-| `tkc projects` | 按项目路径聚合 token 和成本 | 找出最耗 token 的项目 |
-| `tkc models` | 按模型聚合 token 和成本 | 分析模型使用和成本结构 |
-| `tkc tools` | 按工具名统计调用次数 | 查看 Read、Edit、Bash 等工具的使用频率 |
-
-## 全局参数
-
-这些参数可以放在子命令前后：
-
-```bash
-tkc --source codex summary
-tkc summary --source codex
-```
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--source all\|claude\|codex` | 配置值，初始为 `all` | 选择数据来源。`all` 同时统计 Claude Code 和 Codex。 |
-| `--home <PATH>` | 当前 `$HOME` | 指定要扫描的 home 目录。适合测试、读取备份目录或统计另一份用户数据。 |
-| `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
-| `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
-| `--data-file <PATH>` | 配置值，初始为 `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
-| `--pricing-file <PATH>` | 配置值，初始为无 | 指定自定义模型价格 JSON 文件。自定义价格会覆盖同名内置价格。 |
-| `--since <DATE>` | 无 | 只统计该日期及之后的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
-| `--until <DATE>` | 无 | 只统计该日期及之前的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
-| `-h`, `--help` | - | 打印命令帮助。 |
-
-`--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
-命令行参数会覆盖 `tkc config` 保存的默认值。
-`--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照，也不影响 `doctor` 诊断；这样快照会保持完整，报表可以按需切片查看。
-`--pricing-file` 影响会输出 `cost` 的报表命令和 `doctor` 诊断，不影响 `fetch` 写入快照。
-
-日期过滤示例：
-
-```bash
-tkc summary --since 2026-05-01
-tkc days --since 30d
-tkc models --since 7d --until today
-tkc projects --from-json --since 2026-01-01 --until 2026-03-31
-```
-
-相对日期按当前日期向前计算，例如 `7d` 表示 7 天前的日期。过滤区间是闭区间，包含起止日期。
-
-## 命令详解
-
-### `tkc config`
-
-`config` 会在终端中一步一步询问配置项，并保存为 JSON 配置文件。每一步直接按 Enter 会保留当前显示的值；如果之前没有配置过，则保留内置默认值并保存。
-
-```bash
-tkc config
-tkc config show
-tkc config reset
 ```
 
 可配置项：
@@ -268,27 +208,7 @@ Default heatmap months (current: 12):
 config saved: /Users/you/.config/tokencheck/config.json
 ```
 
-配置保存后，普通命令会自动使用这些默认值：
-
-```bash
-tkc fetch
-tkc summary
-tkc heatmap
-```
-
-查看当前生效配置：
-
-```bash
-tkc config show
-```
-
-删除配置文件并恢复内置默认值：
-
-```bash
-tkc config reset
-```
-
-仍然可以临时覆盖：
+命令行参数会覆盖 `tkc config` 保存的默认值：
 
 ```bash
 tkc summary --source codex
@@ -296,9 +216,67 @@ tkc fetch --data-file data/one-off.json
 tkc heatmap --months 6
 ```
 
-### `tkc obsidian`
+## Codex Skill
 
-`obsidian` 会根据配置生成 Obsidian DataviewJS 报表笔记。它使用两个配置项：
+本仓库附带一个 Codex Skill，用来让 Codex 更稳定地回答和操作 `tkc`。
+
+```text
+skills/tokencheck/
+├── SKILL.md
+└── agents/openai.yaml
+```
+
+如果你只是使用工具，不需要 clone 本仓库。先安装 CLI：
+
+```bash
+cargo install ethan-tkc
+```
+
+然后通过 Codex 自带的 skill installer 只安装 Codex Skill：
+
+```bash
+python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo hanlife02/token-check \
+  --path skills/tokencheck
+```
+
+如果本机已经存在旧版 skill，installer 会拒绝覆盖。可以先备份旧目录，再重新安装：
+
+```bash
+mv ~/.codex/skills/tokencheck ~/.codex/skills/tokencheck.bak
+python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo hanlife02/token-check \
+  --path skills/tokencheck
+```
+
+安装后重启 Codex，并用下面的提示触发：
+
+```text
+Use $tokencheck to configure tkc and troubleshoot local token usage reports.
+```
+
+验证本仓库内的 skill 文件：
+
+```bash
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/tokencheck
+```
+
+验证已经安装到本机 Codex 的 skill：
+
+```bash
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py ~/.codex/skills/tokencheck
+```
+
+如果你正在开发或审查本项目，也可以从仓库根目录复制 skill 到 Codex skill 目录：
+
+```bash
+mkdir -p ~/.codex/skills
+cp -R skills/tokencheck ~/.codex/skills/
+```
+
+## Obsidian 集成
+
+`tkc obsidian` 会根据配置生成 Obsidian DataviewJS 报表笔记。它使用两个配置项：
 
 | 配置项 | 用途 |
 | --- | --- |
@@ -334,33 +312,64 @@ tkc obsidian \
 
 生成的 Markdown 会读取 vault 内的 `data/tokencheck.json`，并展示 Summary、Recent Days、Top Models、Top Projects 和 Top Tools。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
 
-### `tkc doctor`
+JSON 通常作为数据源使用，不需要直接在 Obsidian 中阅读。如果想让 Obsidian 文件列表显示 JSON，可以启用 `Files and links -> Detect all file extensions`。
 
-`doctor` 会检查当前环境是否能正常产出报表。它不会写入快照，也不会修改配置。
+## 命令参考
+
+### 命令一览
+
+| 命令 | 作用 | 常用场景 |
+| --- | --- | --- |
+| `tkc` | 默认执行 `summary` | 快速查看总览 |
+| `tkc config` | 交互式配置默认行为 | 设置语言、快照路径、默认来源和默认显示数量 |
+| `tkc config show` | 查看当前生效配置 | 检查配置文件路径和默认值 |
+| `tkc config reset` | 删除配置文件并恢复默认值 | 清空本机自定义配置 |
+| `tkc doctor` | 诊断配置、快照和本机数据目录 | 排查安装后没有数据、路径不对或快照不可读 |
+| `tkc obsidian` | 生成 Obsidian DataviewJS Dashboard | 在 Obsidian 中查看 token 用量报表 |
+| `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
+| `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
+| `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
+| `tkc days --chant` | 用 Tokscale 风格柱状图展示每日 token | 在终端中快速看趋势 |
+| `tkc heatmap` | 用周历热力图展示每日 token 强度 | 看长期使用节奏 |
+| `tkc projects` | 按项目路径聚合 token 和成本 | 找出最耗 token 的项目 |
+| `tkc models` | 按模型聚合 token 和成本 | 分析模型使用和成本结构 |
+| `tkc tools` | 按工具名统计调用次数 | 查看 Read、Edit、Bash 等工具的使用频率 |
+
+### 全局参数
+
+这些参数可以放在子命令前后：
 
 ```bash
-tkc doctor
-tkc doctor --source codex
-tkc doctor --home /Users/yourname
-tkc doctor --data-file data/workstation.json
-tkc doctor --pricing-file ~/.tokencheck/pricing.json
+tkc --source codex summary
+tkc summary --source codex
 ```
 
-诊断项包括：
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--source all\|claude\|codex` | 配置值，初始为 `all` | 选择数据来源。`all` 同时统计 Claude Code 和 Codex。 |
+| `--home <PATH>` | 当前 `$HOME` | 指定要扫描的 home 目录。适合测试、读取备份目录或统计另一份用户数据。 |
+| `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
+| `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
+| `--data-file <PATH>` | 配置值，初始为 `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
+| `--pricing-file <PATH>` | 配置值，初始为无 | 指定自定义模型价格 JSON 文件。自定义价格会覆盖同名内置价格。 |
+| `--since <DATE>` | 无 | 只统计该日期及之后的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
+| `--until <DATE>` | 无 | 只统计该日期及之前的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
+| `-h`, `--help` | - | 打印命令帮助。 |
 
-| 检查项 | 含义 |
-| --- | --- |
-| `Config file` | 当前配置文件路径是否存在；不存在时会使用内置默认值。 |
-| `Home directory` | 实时扫描使用的 home 目录是否存在。 |
-| `Source filter` | 当前生效的数据来源过滤：`all`、`claude` 或 `codex`。 |
-| `Custom pricing file` | 自定义价格文件是否存在且能解析；未配置时使用内置价格。 |
-| `Claude Code data directory` | 是否能找到 `$HOME/.claude/projects`。 |
-| `Codex data directory` | 是否能找到 `$HOME/.codex/sessions`。 |
-| `Snapshot file` | 配置或命令行指定的 JSON 快照是否存在且可读取。 |
-| `Live scan` | 实时扫描当前本机日志后得到的 session、usage、tool 和 token 计数。 |
-| `Report data` | 当前配置下是否已经有可用 usage 数据。 |
+`--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
 
-如果你安装后运行 `tkc` 没有数据，优先运行 `tkc doctor`。常见原因是 Claude/Codex 日志目录不存在、`--home` 指错目录、只配置了某一个 `source`，或者快照文件还没有通过 `tkc fetch` 创建。
+`--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照，也不影响 `doctor` 诊断；这样快照会保持完整，报表可以按需切片查看。过滤区间是闭区间，包含起止日期。
+
+日期过滤示例：
+
+```bash
+tkc summary --since 2026-05-01
+tkc days --since 30d
+tkc models --since 7d --until today
+tkc projects --from-json --since 2026-01-01 --until 2026-03-31
+```
+
+相对日期按当前日期向前计算，例如 `7d` 表示 7 天前的日期。
 
 ### `tkc` / `tkc summary`
 
@@ -537,11 +546,7 @@ tkc models --from-json
 tkc models --since 7d
 ```
 
-这个命令适合分析：
-
-- 哪些模型用得最多。
-- 哪些模型贡献了主要成本。
-- 是否还有未配置价格的模型名。
+这个命令适合分析哪些模型用得最多、哪些模型贡献了主要成本，以及是否还有未配置价格的模型名。
 
 如果某个模型没有内置价格，`cost` 会带 `*`，并在命令结束后输出 warning。带 `*` 的成本是部分成本，不包含未定价模型。
 
@@ -569,7 +574,55 @@ tkc tools --since 2026-05-01
 
 `tools` 不输出 token 或成本，因为工具调用事件本身只记录工具元数据；token 用量来自 usage events。
 
-## 数据来源
+### `tkc doctor`
+
+`doctor` 会检查当前环境是否能正常产出报表。它不会写入快照，也不会修改配置。
+
+```bash
+tkc doctor
+tkc doctor --source codex
+tkc doctor --home /Users/yourname
+tkc doctor --data-file data/workstation.json
+tkc doctor --pricing-file ~/.tokencheck/pricing.json
+```
+
+诊断项包括：
+
+| 检查项 | 含义 |
+| --- | --- |
+| `Config file` | 当前配置文件路径是否存在；不存在时会使用内置默认值。 |
+| `Home directory` | 实时扫描使用的 home 目录是否存在。 |
+| `Source filter` | 当前生效的数据来源过滤：`all`、`claude` 或 `codex`。 |
+| `Custom pricing file` | 自定义价格文件是否存在且能解析；未配置时使用内置价格。 |
+| `Claude Code data directory` | 是否能找到 `$HOME/.claude/projects`。 |
+| `Codex data directory` | 是否能找到 `$HOME/.codex/sessions`。 |
+| `Snapshot file` | 配置或命令行指定的 JSON 快照是否存在且可读取。 |
+| `Live scan` | 实时扫描当前本机日志后得到的 session、usage、tool 和 token 计数。 |
+| `Report data` | 当前配置下是否已经有可用 usage 数据。 |
+
+如果你安装后运行 `tkc` 没有数据，优先运行 `tkc doctor`。常见原因是 Claude/Codex 日志目录不存在、`--home` 指错目录、只配置了某一个 `source`，或者快照文件还没有通过 `tkc fetch` 创建。
+
+## 数据与快照
+
+### 工作方式
+
+报表命令默认会做三件事：
+
+1. 读取 `tkc config` 保存的配置；如果没有配置文件，则使用内置默认值。
+2. 扫描当前用户 `$HOME` 下的 Claude Code 和 Codex 本地数据。
+3. 如果配置的快照文件存在，默认是 `data/tokencheck.json`，把快照数据和实时扫描结果合并后展示。
+
+这样可以保留历史统计：即使 Claude Code 或 Codex 的原始日志后续被清理，只要你之前运行过 `tkc fetch`，快照中的旧数据仍然会参与报表。
+
+```text
+Claude/Codex JSONL -> collector -> ReportData
+data/tokencheck.json -> snapshot loader -> ReportData
+ReportData -> source filter -> command aggregation -> terminal output
+```
+
+`fetch` 是唯一会写入快照的命令。其他报表命令只读取和展示数据。
+
+### 数据来源
 
 Claude Code：
 
@@ -585,7 +638,32 @@ Codex：
 
 当前版本不默认扫描 `~/.codex/log/codex-tui.log`，因为该文件可能非常大，且包含更细的运行日志。
 
-## 输出字段和统计口径
+### JSON 快照
+
+默认快照路径来自 `tkc config` 的 `data_file`，初始值是：
+
+```text
+data/tokencheck.json
+```
+
+推荐用法：
+
+```bash
+tkc fetch
+tkc summary --from-json
+tkc days --from-json --limit 30
+```
+
+快照适合这些场景：
+
+- 本机日志可能被清理，但你想保留历史统计。
+- 想把多个时间点的扫描结果累计在同一个 JSON 文件中。
+- 想在不扫描 `$HOME` 的情况下查看报表。
+- 想把统计数据带到另一台机器上查看。
+
+报表命令默认会合并实时扫描和快照。要只看快照，必须加 `--from-json`。要永久修改快照位置，运行 `tkc config` 并设置 `Snapshot data file`；要临时覆盖，使用 `--data-file <PATH>`。
+
+### 输出字段和统计口径
 
 常见 token 字段：
 
@@ -612,32 +690,7 @@ Codex：
 - 每个 session 只取最后一条非空累计 `token_count.info.total_token_usage`。
 - 统计字段包括 input、cached input、output、reasoning output、total。
 
-## JSON 快照
-
-默认快照路径来自 `tkc config` 的 `data_file`，初始值是：
-
-```text
-data/tokencheck.json
-```
-
-推荐用法：
-
-```bash
-tkc fetch
-tkc summary --from-json
-tkc days --from-json --limit 30
-```
-
-快照适合这些场景：
-
-- 本机日志可能被清理，但你想保留历史统计。
-- 想把多个时间点的扫描结果累计在同一个 JSON 文件中。
-- 想在不扫描 `$HOME` 的情况下查看报表。
-- 想把统计数据带到另一台机器上查看。
-
-报表命令默认会合并实时扫描和快照。要只看快照，必须加 `--from-json`。要永久修改快照位置，运行 `tkc config` 并设置 `Snapshot data file`；要临时覆盖，使用 `--data-file <PATH>`。
-
-## 计费口径
+## 计费
 
 - `summary`、`days`、`projects` 和 `models` 会输出 `cost`，单位是美元。
 - Codex 数据里的 cached input 视为 input 的子集，不重复计入普通 input。
@@ -647,6 +700,7 @@ tkc days --from-json --limit 30
 - 当前内置价格覆盖常见 OpenAI GPT/o 系列、Claude Opus/Sonnet/Haiku、Gemini 3/2.5/2.0、DeepSeek V4、MiMo V2/V2.5、Kimi K2/Moonshot V1 官方模型名和常见 snapshot 名。
 - 如果设置了自定义价格文件，同名自定义价格会优先于内置价格。
 - 如果模型没有内置价格，也没有自定义价格，成本显示会带 `*`，并在 warning 中说明该模型未计入美元总额。
+- 成本只按文本 token 估算，不包含订阅费、Batch/Flex/Priority 折扣、工具调用附加费、图片/音频/视频单独计费、税费或第三方代理加价。
 
 ### 自定义模型价格
 
@@ -685,7 +739,6 @@ tkc models --pricing-file ~/.tokencheck/pricing.json
 ```
 
 模型名会按和内置价格相同的规则规范化：大小写不敏感，`_` 会当成 `-`，`provider/model` 会按最后一段模型名匹配。因此 `openai/gpt-4.1-mini` 和 `gpt-4.1-mini` 会匹配同一条价格。自定义价格会覆盖同名内置价格。
-- 成本只按文本 token 估算，不包含订阅费、Batch/Flex/Priority 折扣、工具调用附加费、图片/音频/视频单独计费、税费或第三方代理加价。
 
 ## 隐私边界
 
@@ -707,7 +760,9 @@ tkc models --pricing-file ~/.tokencheck/pricing.json
 - 第三方代理模型名可能不等同于官方模型名，只能按已知别名匹配。
 - `heatmap` 只展示 token 强度，不展示成本。
 
-## 项目结构
+## 开发
+
+### 项目结构
 
 ```text
 src/
@@ -724,9 +779,35 @@ src/
 
 核心数据流是：读取本机日志或 JSON 快照，归一化为 `ReportData`，按命令维度聚合，再输出表格、柱状图、热力图或成本估算。
 
-## 发布流程
+### 开发验证
 
-项目包含 GitHub Actions workflow：`.github/workflows/cargo-publish.yml`。
+提交前建议运行：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+本地冒烟检查：
+
+```bash
+cargo run --bin tkc -- summary --limit 5
+cargo run --bin tkc -- days --limit 5
+cargo run --bin tkc -- days --from-json --limit 20 --chant
+cargo run --bin tkc -- heatmap --from-json --months 12
+cargo run --bin tkc -- projects --limit 5
+cargo run --bin tkc -- models --limit 5
+cargo run --bin tkc -- tools --limit 5
+```
+
+## 发布
+
+项目包含 GitHub Actions workflow：
+
+```text
+.github/workflows/cargo-publish.yml
+```
 
 触发方式：
 
@@ -752,24 +833,6 @@ CARGO_REGISTRY_TOKEN
 
 这个 token 来自 crates.io 账户设置。crates.io 账户必须有已验证邮箱。之后每次要发布新包，需要先提升 `Cargo.toml` 和 `Cargo.lock` 中的版本号，再推送到 `main`。crates.io 不允许覆盖已经发布过的同一版本。
 
-## 开发验证
+## License
 
-提交前建议运行：
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-本地冒烟检查：
-
-```bash
-cargo run --bin tkc -- summary --limit 5
-cargo run --bin tkc -- days --limit 5
-cargo run --bin tkc -- days --from-json --limit 20 --chant
-cargo run --bin tkc -- heatmap --from-json --months 12
-cargo run --bin tkc -- projects --limit 5
-cargo run --bin tkc -- models --limit 5
-cargo run --bin tkc -- tools --limit 5
-```
+MIT. See [LICENSE](LICENSE).
