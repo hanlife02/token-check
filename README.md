@@ -4,7 +4,7 @@
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.9.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+当前 crate 版本：`0.10.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能概览
 
@@ -14,6 +14,7 @@
 - 按项目路径查看使用排行。
 - 按模型查看 token 分布。
 - 按模型价格估算每日、项目、模型和总美元成本。
+- 支持自定义模型价格文件，用来覆盖或补充内置价格。
 - 按工具名查看调用次数。
 - 将本机扫描结果合并保存为 JSON 快照，避免本机日志缺失、清理或轮转后丢失历史统计。
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
@@ -193,6 +194,7 @@ tkc summary --source codex
 | `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
 | `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
 | `--data-file <PATH>` | 配置值，初始为 `data/tokencheck.json` | 指定 `fetch` 写入或 `--from-json` 读取的快照文件。 |
+| `--pricing-file <PATH>` | 配置值，初始为无 | 指定自定义模型价格 JSON 文件。自定义价格会覆盖同名内置价格。 |
 | `--since <DATE>` | 无 | 只统计该日期及之后的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
 | `--until <DATE>` | 无 | 只统计该日期及之前的数据。支持 `YYYY-MM-DD`、`today`、`7d`、`30d`。 |
 | `-h`, `--help` | - | 打印命令帮助。 |
@@ -200,6 +202,7 @@ tkc summary --source codex
 `--home` 只影响实时扫描。使用 `--from-json` 时，命令只读取 `--data-file`，不会访问 `$HOME`。
 命令行参数会覆盖 `tkc config` 保存的默认值。
 `--since` 和 `--until` 只影响报表命令，不影响 `fetch` 写入快照，也不影响 `doctor` 诊断；这样快照会保持完整，报表可以按需切片查看。
+`--pricing-file` 影响会输出 `cost` 的报表命令和 `doctor` 诊断，不影响 `fetch` 写入快照。
 
 日期过滤示例：
 
@@ -231,6 +234,7 @@ tkc config reset
 | `language` | `en` | 输出语言。支持 `en` 和 `zh`。 |
 | `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`。 |
 | `data_file` | `data/tokencheck.json` | 默认快照文件路径，也就是 `fetch` 保存和 `--from-json` 读取的位置。 |
+| `pricing_file` | 无 | 自定义价格 JSON 文件路径。输入 `none`、`null` 或 `-` 可以清空。 |
 | `limit` | `20` | 默认表格或排行行数。 |
 | `heatmap_months` | `12` | `heatmap` 默认展示月份数。 |
 
@@ -244,6 +248,7 @@ Press Enter on a blank input to keep and save the shown value.
 Language [en/zh] (current: en):
 Default source [all/claude/codex] (current: all):
 Snapshot data file (current: data/tokencheck.json): ~/.tokencheck/usage.json
+Custom pricing file [path/none] (current: none): ~/.tokencheck/pricing.json
 Default row limit (current: 20):
 Default heatmap months (current: 12):
 
@@ -287,6 +292,7 @@ tkc doctor
 tkc doctor --source codex
 tkc doctor --home /Users/yourname
 tkc doctor --data-file data/workstation.json
+tkc doctor --pricing-file ~/.tokencheck/pricing.json
 ```
 
 诊断项包括：
@@ -296,6 +302,7 @@ tkc doctor --data-file data/workstation.json
 | `Config file` | 当前配置文件路径是否存在；不存在时会使用内置默认值。 |
 | `Home directory` | 实时扫描使用的 home 目录是否存在。 |
 | `Source filter` | 当前生效的数据来源过滤：`all`、`claude` 或 `codex`。 |
+| `Custom pricing file` | 自定义价格文件是否存在且能解析；未配置时使用内置价格。 |
 | `Claude Code data directory` | 是否能找到 `$HOME/.claude/projects`。 |
 | `Codex data directory` | 是否能找到 `$HOME/.codex/sessions`。 |
 | `Snapshot file` | 配置或命令行指定的 JSON 快照是否存在且可读取。 |
@@ -587,7 +594,46 @@ tkc days --from-json --limit 30
 - Claude 模型按 input、cache read、5 分钟 cache write、1 小时 cache write 和 output 分别计费。
 - 其他文本模型按 input、cached input/cache hit 和 output 估算。
 - 当前内置价格覆盖常见 OpenAI GPT/o 系列、Claude Opus/Sonnet/Haiku、Gemini 3/2.5/2.0、DeepSeek V4、MiMo V2/V2.5、Kimi K2/Moonshot V1 官方模型名和常见 snapshot 名。
-- 如果模型没有内置价格，成本显示会带 `*`，并在 warning 中说明该模型未计入美元总额。
+- 如果设置了自定义价格文件，同名自定义价格会优先于内置价格。
+- 如果模型没有内置价格，也没有自定义价格，成本显示会带 `*`，并在 warning 中说明该模型未计入美元总额。
+
+### 自定义模型价格
+
+自定义价格文件是一个 JSON 文件，单位是每 100 万 token 的美元价格。最小格式如下：
+
+```json
+{
+  "models": {
+    "my-proxy-model": {
+      "input": 2.0,
+      "cached_input": 0.5,
+      "cache_creation_5m": 3.0,
+      "cache_creation_1h": 4.0,
+      "output": 8.0
+    }
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `input` | 是 | 普通 input token 单价。 |
+| `output` | 是 | output token 单价。 |
+| `cached_input` | 否 | cached input/cache read 单价；省略时等于 `input`。 |
+| `cache_creation_5m` | 否 | Claude 5 分钟 cache write 单价；省略时为 `0`。 |
+| `cache_creation_1h` | 否 | Claude 1 小时 cache write 单价；省略时为 `0`。 |
+
+配置方式：
+
+```bash
+tkc config
+tkc summary --pricing-file ~/.tokencheck/pricing.json
+tkc models --pricing-file ~/.tokencheck/pricing.json
+```
+
+模型名会按和内置价格相同的规则规范化：大小写不敏感，`_` 会当成 `-`，`provider/model` 会按最后一段模型名匹配。因此 `openai/gpt-4.1-mini` 和 `gpt-4.1-mini` 会匹配同一条价格。自定义价格会覆盖同名内置价格。
 - 成本只按文本 token 估算，不包含订阅费、Batch/Flex/Priority 折扣、工具调用附加费、图片/音频/视频单独计费、税费或第三方代理加价。
 
 ## 隐私边界

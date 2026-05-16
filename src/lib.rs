@@ -52,6 +52,9 @@ struct Cli {
     #[arg(long, global = true, help = "Read or write the JSON snapshot file")]
     data_file: Option<PathBuf>,
 
+    #[arg(long, global = true, help = "Load custom model pricing JSON file")]
+    pricing_file: Option<PathBuf>,
+
     #[arg(
         long,
         global = true,
@@ -160,6 +163,7 @@ struct EffectiveSettings {
     source: SourceFilter,
     limit: usize,
     data_file: PathBuf,
+    pricing_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,6 +250,11 @@ pub fn run() -> Result<()> {
             cli.data_file
                 .unwrap_or_else(|| app_config.data_file.clone()),
         )?,
+        pricing_file: cli
+            .pricing_file
+            .or_else(|| app_config.pricing_file.clone())
+            .map(expand_home_path)
+            .transpose()?,
     };
     let home = cli.home.clone();
 
@@ -262,28 +271,37 @@ pub fn run() -> Result<()> {
             settings.source,
             home,
             &settings.data_file,
+            settings.pricing_file.as_deref(),
             settings.language,
         );
     }
 
+    let shows_cost = command.shows_cost();
+    let pricing = if shows_cost {
+        load_pricing(settings.pricing_file.as_deref())?
+    } else {
+        billing::Pricing::default()
+    };
     let date_filter = DateFilter::parse(cli.since.as_deref(), cli.until.as_deref())?;
     let mut data = report_data(settings.source, home, &settings.data_file, cli.from_json)?;
     apply_date_filter(&mut data, date_filter);
-    let shows_cost = command.shows_cost();
 
     match command {
         Command::Config { .. } => unreachable!("config returns before report rendering"),
         Command::Fetch => unreachable!("fetch returns before report rendering"),
-        Command::Summary => print_summary(&data, settings.language),
-        Command::Days { chant } => print_days(&data, settings.limit, chant, settings.language),
+        Command::Summary => print_summary(&data, settings.language, &pricing),
+        Command::Days { chant } => {
+            print_days(&data, settings.limit, chant, settings.language, &pricing)
+        }
         Command::Heatmap { months } => print_heatmap(
             &data,
             months.unwrap_or(app_config.heatmap_months),
             settings.language,
+            &pricing,
         ),
         Command::Doctor => unreachable!("doctor returns before report rendering"),
-        Command::Projects => print_projects(&data, settings.limit, settings.language),
-        Command::Models => print_models(&data, settings.limit, settings.language),
+        Command::Projects => print_projects(&data, settings.limit, settings.language, &pricing),
+        Command::Models => print_models(&data, settings.limit, settings.language, &pricing),
         Command::Tools => print_tools(&data, settings.limit, settings.language),
     }
 
@@ -292,6 +310,7 @@ pub fn run() -> Result<()> {
         warnings.extend(localized_unpriced_model_warnings(
             settings.language,
             data.usage_events.iter(),
+            &pricing,
         ));
     }
     print_warnings(settings.language, &warnings);
@@ -324,6 +343,11 @@ fn run_config_interactive(mut app_config: AppConfig) -> Result<()> {
         app_config.language,
         label_config_data_file(app_config.language),
         &app_config.data_file,
+    )?;
+    app_config.pricing_file = prompt_optional_path(
+        app_config.language,
+        label_config_pricing_file(app_config.language),
+        app_config.pricing_file.as_deref(),
     )?;
     app_config.limit = prompt_positive_usize(
         app_config.language,
@@ -371,6 +395,11 @@ fn print_config(app_config: AppConfig) -> Result<()> {
         label_config_data_file(language),
         app_config.data_file.display()
     );
+    println!(
+        "{}: {}",
+        label_config_pricing_file(language),
+        format_optional_path(app_config.pricing_file.as_deref(), language)
+    );
     println!("{}: {}", label_config_limit(language), app_config.limit);
     println!(
         "{}: {}",
@@ -394,10 +423,18 @@ fn reset_config(language: Language) -> Result<()> {
     Ok(())
 }
 
+fn load_pricing(pricing_file: Option<&Path>) -> Result<billing::Pricing> {
+    match pricing_file {
+        Some(path) => billing::Pricing::load(path),
+        None => Ok(billing::Pricing::default()),
+    }
+}
+
 fn run_doctor(
     filter: SourceFilter,
     home: Option<PathBuf>,
     data_file: &Path,
+    pricing_file: Option<&Path>,
     language: Language,
 ) -> Result<()> {
     let home = home.unwrap_or(home_dir()?);
@@ -419,6 +456,7 @@ fn run_doctor(
             true,
             filter.as_str().to_string(),
         ),
+        doctor_pricing_row(pricing_file, language),
     ];
 
     if source_filter_includes(filter, Source::Claude) {
@@ -499,6 +537,33 @@ fn doctor_row(check: &str, ok: bool, detail: String) -> DoctorRow {
             DoctorStatus::Warn
         },
         detail,
+    }
+}
+
+fn doctor_pricing_row(pricing_file: Option<&Path>, language: Language) -> DoctorRow {
+    match pricing_file {
+        Some(path) => match billing::Pricing::load(path) {
+            Ok(pricing) => doctor_row(
+                label_config_pricing_file(language),
+                true,
+                format!(
+                    "{} ({} {})",
+                    path.display(),
+                    pricing.custom_model_count(),
+                    label_custom_models(language)
+                ),
+            ),
+            Err(err) => doctor_row(
+                label_config_pricing_file(language),
+                false,
+                format!("{} ({err:#})", path.display()),
+            ),
+        },
+        None => doctor_row(
+            label_config_pricing_file(language),
+            true,
+            text(language, "built-in pricing only", "仅使用内置价格").to_string(),
+        ),
     }
 }
 
@@ -623,6 +688,33 @@ fn prompt_path(language: Language, label: &str, current: &Path) -> Result<PathBu
     }
 }
 
+fn prompt_optional_path(
+    language: Language,
+    label: &str,
+    current: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    let prompt = format!(
+        "{} [path/none] ({}: {}): ",
+        label,
+        label_current(language),
+        format_optional_path(current, language)
+    );
+    let input = prompt_line(&prompt)?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(current.map(Path::to_path_buf));
+    }
+    if matches!(input.to_ascii_lowercase().as_str(), "none" | "null" | "-") {
+        return Ok(None);
+    }
+    Ok(Some(expand_home_path(PathBuf::from(input))?))
+}
+
+fn format_optional_path(path: Option<&Path>, language: Language) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| label_none(language).to_string())
+}
+
 fn prompt_positive_usize(language: Language, label: &str, current: usize) -> Result<usize> {
     loop {
         let prompt = format!("{} ({}: {}): ", label, label_current(language), current);
@@ -702,8 +794,10 @@ fn localized_warning(language: Language, warning: &str) -> String {
 fn localized_unpriced_model_warnings<'a>(
     language: Language,
     events: impl Iterator<Item = &'a crate::model::UsageEvent>,
+    pricing: &billing::Pricing,
 ) -> Vec<String> {
-    billing::unpriced_models(events)
+    pricing
+        .unpriced_models(events)
         .into_iter()
         .map(|model| match language {
             Language::En => {
@@ -773,6 +867,10 @@ fn label_config_data_file(language: Language) -> &'static str {
     text(language, "Snapshot data file", "快照数据文件")
 }
 
+fn label_config_pricing_file(language: Language) -> &'static str {
+    text(language, "Custom pricing file", "自定义价格文件")
+}
+
 fn label_config_limit(language: Language) -> &'static str {
     text(language, "Default row limit", "默认输出行数")
 }
@@ -831,6 +929,14 @@ fn label_report_ready(language: Language) -> &'static str {
 
 fn label_exists(language: Language) -> &'static str {
     text(language, "exists", "存在")
+}
+
+fn label_none(language: Language) -> &'static str {
+    text(language, "none", "无")
+}
+
+fn label_custom_models(language: Language) -> &'static str {
+    text(language, "custom models", "个自定义模型")
 }
 
 fn label_missing(language: Language) -> &'static str {
@@ -1195,7 +1301,7 @@ impl From<&ReportData> for DataCounts {
     }
 }
 
-fn print_summary(data: &ReportData, language: Language) {
+fn print_summary(data: &ReportData, language: Language, pricing: &billing::Pricing) {
     let mut rows = Vec::new();
     let sources = [Source::Claude, Source::Codex];
     for source in sources {
@@ -1217,6 +1323,7 @@ fn print_summary(data: &ReportData, language: Language) {
             data.usage_events
                 .iter()
                 .filter(|event| event.source == source),
+            pricing,
         );
         rows.push(vec![
             source.label().to_string(),
@@ -1233,7 +1340,7 @@ fn print_summary(data: &ReportData, language: Language) {
         ]);
     }
 
-    let total_stats = sum_usage_stats(data.usage_events.iter());
+    let total_stats = sum_usage_stats(data.usage_events.iter(), pricing);
     let sessions_with_usage = data
         .usage_events
         .iter()
@@ -1301,8 +1408,14 @@ fn print_summary(data: &ReportData, language: Language) {
     );
 }
 
-fn print_days(data: &ReportData, limit: usize, chant: bool, language: Language) {
-    let rows = daily_usage_rows(data, limit);
+fn print_days(
+    data: &ReportData,
+    limit: usize,
+    chant: bool,
+    language: Language,
+    pricing: &billing::Pricing,
+) {
+    let rows = daily_usage_rows(data, limit, pricing);
     if chant {
         print_days_histogram(&rows, language);
         return;
@@ -1341,14 +1454,18 @@ fn print_days(data: &ReportData, limit: usize, chant: bool, language: Language) 
     );
 }
 
-fn daily_usage_rows(data: &ReportData, limit: usize) -> Vec<DailyUsageRow> {
+fn daily_usage_rows(
+    data: &ReportData,
+    limit: usize,
+    pricing: &billing::Pricing,
+) -> Vec<DailyUsageRow> {
     let mut usage_by_date: BTreeMap<String, UsageStats> = BTreeMap::new();
     let mut sessions_by_date: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for event in &data.usage_events {
         usage_by_date
             .entry(event.date.clone())
             .or_default()
-            .add(event);
+            .add(event, pricing);
     }
     for session in &data.sessions {
         sessions_by_date
@@ -1507,13 +1624,13 @@ fn histogram_axis_label(level: usize, height: usize, max_usage: u64) -> String {
     }
 }
 
-fn print_heatmap(data: &ReportData, months: usize, language: Language) {
+fn print_heatmap(data: &ReportData, months: usize, language: Language, pricing: &billing::Pricing) {
     let mut usage_by_date: BTreeMap<CivilDate, UsageStats> = BTreeMap::new();
     for event in &data.usage_events {
         let Some(date) = CivilDate::parse(&event.date) else {
             continue;
         };
-        usage_by_date.entry(date).or_default().add(event);
+        usage_by_date.entry(date).or_default().add(event, pricing);
     }
 
     let Some(latest_date) = usage_by_date.keys().next_back().copied() else {
@@ -1668,11 +1785,12 @@ fn github_heatmap_grid_lines(
     lines
 }
 
-fn print_projects(data: &ReportData, limit: usize, language: Language) {
+fn print_projects(data: &ReportData, limit: usize, language: Language, pricing: &billing::Pricing) {
     let rows = aggregate_usage(
         data,
         |event| (event.source.label().to_string(), event.project.clone()),
         limit,
+        pricing,
     )
     .into_iter()
     .map(|((source, project), stats)| {
@@ -1706,11 +1824,12 @@ fn print_projects(data: &ReportData, limit: usize, language: Language) {
     );
 }
 
-fn print_models(data: &ReportData, limit: usize, language: Language) {
+fn print_models(data: &ReportData, limit: usize, language: Language, pricing: &billing::Pricing) {
     let rows = aggregate_usage(
         data,
         |event| (event.source.label().to_string(), event.model.clone()),
         limit,
+        pricing,
     )
     .into_iter()
     .map(|((source, model), stats)| {
@@ -1790,14 +1909,19 @@ fn print_tools(data: &ReportData, limit: usize, language: Language) {
     );
 }
 
-fn aggregate_usage<K, F>(data: &ReportData, key_fn: F, limit: usize) -> Vec<(K, UsageStats)>
+fn aggregate_usage<K, F>(
+    data: &ReportData,
+    key_fn: F,
+    limit: usize,
+    pricing: &billing::Pricing,
+) -> Vec<(K, UsageStats)>
 where
     K: Ord + Clone,
     F: Fn(&crate::model::UsageEvent) -> K,
 {
     let mut map: BTreeMap<K, UsageStats> = BTreeMap::new();
     for event in &data.usage_events {
-        map.entry(key_fn(event)).or_default().add(event);
+        map.entry(key_fn(event)).or_default().add(event, pricing);
     }
     let mut rows = map.into_iter().collect::<Vec<_>>();
     rows.sort_by(|a, b| {
@@ -1833,16 +1957,19 @@ struct HistogramColumn<'a> {
 }
 
 impl UsageStats {
-    fn add(&mut self, event: &crate::model::UsageEvent) {
+    fn add(&mut self, event: &crate::model::UsageEvent, pricing: &billing::Pricing) {
         self.usage.add_assign(&event.usage);
-        self.cost.add_assign(billing::event_cost(event));
+        self.cost.add_assign(pricing.event_cost(event));
     }
 }
 
-fn sum_usage_stats<'a>(events: impl Iterator<Item = &'a crate::model::UsageEvent>) -> UsageStats {
+fn sum_usage_stats<'a>(
+    events: impl Iterator<Item = &'a crate::model::UsageEvent>,
+    pricing: &billing::Pricing,
+) -> UsageStats {
     let mut stats = UsageStats::default();
     for event in events {
-        stats.add(event);
+        stats.add(event, pricing);
     }
     stats
 }

@@ -1,5 +1,9 @@
 use crate::model::{Source, Usage, UsageEvent};
-use std::collections::BTreeSet;
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 
 const TOKENS_PER_MILLION: f64 = 1_000_000.0;
 
@@ -39,9 +43,140 @@ struct PriceRule {
     high_context: Option<(u64, TokenPrices)>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Pricing {
+    custom_rules: BTreeMap<String, PriceRule>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CustomPricingFile {
+    #[serde(default)]
+    models: BTreeMap<String, CustomModelPrice>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct CustomModelPrice {
+    input: f64,
+    #[serde(default)]
+    cached_input: Option<f64>,
+    #[serde(default, alias = "cache_creation_input_5m")]
+    cache_creation_5m: Option<f64>,
+    #[serde(default, alias = "cache_creation_input_1h")]
+    cache_creation_1h: Option<f64>,
+    output: f64,
+}
+
 pub fn event_cost(event: &UsageEvent) -> Cost {
+    Pricing::default().event_cost(event)
+}
+
+pub fn unpriced_model_warnings<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
+    Pricing::default().unpriced_model_warnings(events)
+}
+
+pub fn unpriced_models<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
+    Pricing::default().unpriced_models(events)
+}
+
+impl Pricing {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        Self::from_json_str(&content).with_context(|| format!("parse {}", path.display()))
+    }
+
+    pub fn custom_model_count(&self) -> usize {
+        self.custom_rules.len()
+    }
+
+    pub fn event_cost(&self, event: &UsageEvent) -> Cost {
+        event_cost_with_pricing(event, self.price_rule_for_model(&event.model))
+    }
+
+    pub fn unpriced_model_warnings<'a>(
+        &self,
+        events: impl Iterator<Item = &'a UsageEvent>,
+    ) -> Vec<String> {
+        self.unpriced_models(events)
+            .into_iter()
+            .map(|model| format!("No pricing configured for {model}; omitted from dollar totals"))
+            .collect()
+    }
+
+    pub fn unpriced_models<'a>(&self, events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
+        events
+            .filter(|event| event.usage.computed_total() > 0)
+            .filter(|event| self.price_rule_for_model(&event.model).is_none())
+            .map(|event| format!("{}/{}", event.source.label(), event.model))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn from_json_str(content: &str) -> Result<Self> {
+        let file = serde_json::from_str::<CustomPricingFile>(content)?;
+        let mut custom_rules = BTreeMap::new();
+        for (model, price) in file.models {
+            let normalized = normalized_model(&model);
+            if normalized.is_empty() || normalized == "unknown" || normalized == "<synthetic>" {
+                return Err(anyhow!("invalid custom pricing model name {model:?}"));
+            }
+            custom_rules.insert(normalized, PriceRule::flat(price.to_token_prices(&model)?));
+        }
+        Ok(Self { custom_rules })
+    }
+
+    fn price_rule_for_model(&self, model: &str) -> Option<PriceRule> {
+        let model = normalized_model(model);
+        if model == "unknown" || model == "<synthetic>" {
+            return None;
+        }
+        self.custom_rules
+            .get(&model)
+            .copied()
+            .or_else(|| builtin_price_rule_for_model(&model))
+    }
+}
+
+impl CustomModelPrice {
+    fn to_token_prices(self, model: &str) -> Result<TokenPrices> {
+        let input = validate_price(model, "input", self.input)?;
+        let output = validate_price(model, "output", self.output)?;
+        Ok(TokenPrices {
+            input,
+            cached_input: validate_price(
+                model,
+                "cached_input",
+                self.cached_input.unwrap_or(input),
+            )?,
+            cache_creation_5m: validate_price(
+                model,
+                "cache_creation_5m",
+                self.cache_creation_5m.unwrap_or(0.0),
+            )?,
+            cache_creation_1h: validate_price(
+                model,
+                "cache_creation_1h",
+                self.cache_creation_1h.unwrap_or(0.0),
+            )?,
+            output,
+        })
+    }
+}
+
+fn validate_price(model: &str, field: &str, value: f64) -> Result<f64> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(anyhow!(
+            "custom pricing for {model:?} has invalid {field}: {value}"
+        ))
+    }
+}
+
+fn event_cost_with_pricing(event: &UsageEvent, price_rule: Option<PriceRule>) -> Cost {
     let accounting = usage_accounting(event.source);
-    let Some(price_rule) = price_rule_for_model(&event.model) else {
+    let Some(price_rule) = price_rule else {
         if event.usage.computed_total() == 0 {
             return Cost::default();
         }
@@ -57,23 +192,6 @@ pub fn event_cost(event: &UsageEvent) -> Cost {
         unpriced_events: 0,
         unpriced_tokens: 0,
     }
-}
-
-pub fn unpriced_model_warnings<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
-    unpriced_models(events)
-        .into_iter()
-        .map(|model| format!("No pricing configured for {model}; omitted from dollar totals"))
-        .collect()
-}
-
-pub fn unpriced_models<'a>(events: impl Iterator<Item = &'a UsageEvent>) -> Vec<String> {
-    events
-        .filter(|event| event.usage.computed_total() > 0)
-        .filter(|event| price_rule_for_model(&event.model).is_none())
-        .map(|event| format!("{}/{}", event.source.label(), event.model))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 impl TokenPrices {
@@ -166,19 +284,14 @@ fn prompt_tokens_for_tier(usage: &Usage, accounting: UsageAccounting) -> u64 {
     }
 }
 
-fn price_rule_for_model(model: &str) -> Option<PriceRule> {
-    let model = normalized_model(model);
-    if model == "unknown" || model == "<synthetic>" {
-        return None;
-    }
-
-    openai_prices(&model)
-        .or_else(|| anthropic_prices(&model))
-        .or_else(|| gemini_prices(&model))
-        .or_else(|| deepseek_prices(&model))
-        .or_else(|| mimo_prices(&model))
-        .or_else(|| kimi_prices(&model))
-        .or_else(|| moonshot_prices(&model))
+fn builtin_price_rule_for_model(model: &str) -> Option<PriceRule> {
+    openai_prices(model)
+        .or_else(|| anthropic_prices(model))
+        .or_else(|| gemini_prices(model))
+        .or_else(|| deepseek_prices(model))
+        .or_else(|| mimo_prices(model))
+        .or_else(|| kimi_prices(model))
+        .or_else(|| moonshot_prices(model))
 }
 
 fn openai_prices(model: &str) -> Option<PriceRule> {
@@ -452,7 +565,7 @@ fn cost_component(tokens: u64, dollars_per_million: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_cost, unpriced_model_warnings};
+    use super::{event_cost, unpriced_model_warnings, Pricing};
     use crate::model::{Source, Usage, UsageEvent};
 
     #[test]
@@ -690,6 +803,88 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn custom_pricing_overrides_builtin_models() {
+        let pricing = Pricing::from_json_str(
+            r#"{
+                "models": {
+                    "openai/gpt-4.1-mini": {
+                        "input": 10.0,
+                        "cached_input": 1.0,
+                        "output": 20.0
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let cost = pricing.event_cost(&event(
+            Source::Codex,
+            "gpt-4.1-mini",
+            Usage {
+                input: 1_000_000,
+                cached_input: 250_000,
+                output: 1_000_000,
+                total: 2_000_000,
+                ..Usage::default()
+            },
+        ));
+
+        assert_eq!(pricing.custom_model_count(), 1);
+        assert_eq!(format!("{:.2}", cost.usd), "27.75");
+        assert_eq!(cost.unpriced_events, 0);
+    }
+
+    #[test]
+    fn custom_pricing_prices_unknown_models() {
+        let pricing = Pricing::from_json_str(
+            r#"{
+                "models": {
+                    "my-proxy-model": {
+                        "input": 2.0,
+                        "cache_creation_5m": 3.0,
+                        "cache_creation_1h": 4.0,
+                        "cached_input": 0.5,
+                        "output": 8.0
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let event = event(
+            Source::Claude,
+            "my-proxy-model",
+            Usage {
+                input: 1_000_000,
+                cached_input: 1_000_000,
+                cache_creation_input_5m: 1_000_000,
+                cache_creation_input_1h: 1_000_000,
+                output: 1_000_000,
+                total: 5_000_000,
+                ..Usage::default()
+            },
+        );
+
+        assert_eq!(format!("{:.2}", pricing.event_cost(&event).usd), "17.50");
+        assert!(pricing.unpriced_model_warnings([event].iter()).is_empty());
+    }
+
+    #[test]
+    fn custom_pricing_rejects_invalid_prices() {
+        let err = Pricing::from_json_str(
+            r#"{
+                "models": {
+                    "bad-model": {
+                        "input": -1.0,
+                        "output": 1.0
+                    }
+                }
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid input"));
     }
 
     fn event(source: Source, model: &str, usage: Usage) -> UsageEvent {

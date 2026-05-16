@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,20 @@ pub struct AppConfig {
     pub language: Language,
     pub source: SourcePreference,
     pub data_file: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_optional_path")]
+    pub pricing_file: Option<PathBuf>,
     pub limit: usize,
     pub heatmap_months: usize,
+}
+
+fn deserialize_optional_path<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = Option::<PathBuf>::deserialize(deserializer)?;
+    Ok(path.filter(|path| !path.as_os_str().is_empty()))
 }
 
 impl Default for AppConfig {
@@ -24,6 +36,7 @@ impl Default for AppConfig {
             language: Language::default(),
             source: SourcePreference::default(),
             data_file: PathBuf::from(DEFAULT_DATA_FILE),
+            pricing_file: None,
             limit: DEFAULT_LIMIT,
             heatmap_months: DEFAULT_HEATMAP_MONTHS,
         }
@@ -139,6 +152,13 @@ fn load_or_default_from(path: &Path) -> Result<AppConfig> {
     if config.data_file.as_os_str().is_empty() {
         config.data_file = PathBuf::from(DEFAULT_DATA_FILE);
     }
+    if config
+        .pricing_file
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        config.pricing_file = None;
+    }
     Ok(config)
 }
 
@@ -177,6 +197,7 @@ mod tests {
         assert_eq!(config.language, Language::En);
         assert_eq!(config.source, SourcePreference::All);
         assert_eq!(config.data_file.to_string_lossy(), DEFAULT_DATA_FILE);
+        assert_eq!(config.pricing_file, None);
         assert_eq!(config.limit, 20);
         assert_eq!(config.heatmap_months, 12);
     }
@@ -208,7 +229,16 @@ mod tests {
         assert_eq!(config.language, Language::Zh);
         assert_eq!(config.source, SourcePreference::All);
         assert_eq!(config.data_file.to_string_lossy(), DEFAULT_DATA_FILE);
+        assert_eq!(config.pricing_file, None);
         assert_eq!(config.limit, 20);
         assert_eq!(config.heatmap_months, 12);
+    }
+
+    #[test]
+    fn empty_pricing_file_uses_none() {
+        let config =
+            serde_json::from_str::<AppConfig>(r#"{"language":"zh","pricing_file":""}"#).unwrap();
+
+        assert_eq!(config.pricing_file, None);
     }
 }
