@@ -1,0 +1,233 @@
+name: Build GitHub release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag. Defaults to v<package version>."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate crate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Read crate metadata
+        id: crate
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                  text=True,
+              )
+          )
+          package = metadata["packages"][0]
+          print(f"version={package['version']}")
+          PY
+
+      - name: Build binaries
+        run: cargo build --locked --release --target ${{ matrix.target }} --bins
+
+      - name: Package Unix archive
+        id: unix-archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_name="tokencheck-v${{ steps.crate.outputs.version }}-${{ matrix.target }}"
+          staging="dist/${asset_name}"
+
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/tkc" "$staging/"
+          cp "target/${{ matrix.target }}/release/tokencheck" "$staging/"
+          cp README.md LICENSE "$staging/"
+          tar -czf "${asset_name}.tar.gz" -C dist "$asset_name"
+
+          echo "asset_name=${asset_name}" >> "$GITHUB_OUTPUT"
+          echo "asset_path=${asset_name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows archive
+        id: windows-archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $assetName = "tokencheck-v${{ steps.crate.outputs.version }}-${{ matrix.target }}"
+          $staging = Join-Path "dist" $assetName
+
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tkc.exe" $staging
+          Copy-Item "target/${{ matrix.target }}/release/tokencheck.exe" $staging
+          Copy-Item README.md $staging
+          Copy-Item LICENSE $staging
+          Compress-Archive -Path $staging -DestinationPath "${assetName}.zip" -Force
+
+          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "asset_path=${assetName}.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.unix-archive.outputs.asset_name || steps.windows-archive.outputs.asset_name }}
+          path: ${{ steps.unix-archive.outputs.asset_path || steps.windows-archive.outputs.asset_path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read crate metadata
+        id: crate
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                  text=True,
+              )
+          )
+          package = metadata["packages"][0]
+          print(f"version={package['version']}")
+          PY
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="v${{ steps.crate.outputs.version }}"
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "title=tokencheck ${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release.outputs.tag }}"
+          title="${{ steps.release.outputs.title }}"
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f | sort)
+
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets found." >&2
+            exit 1
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            args=(
+              release create "$tag" "${assets[@]}"
+              --title "$title"
+              --target "$GITHUB_SHA"
+              --generate-notes
+            )
+
+            if [[ "${INPUT_PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+
+            gh "${args[@]}"
+          fi

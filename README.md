@@ -803,15 +803,18 @@ cargo run --bin tkc -- tools --limit 5
 
 ## 发布
 
-项目包含 GitHub Actions workflow：
+项目包含两个 GitHub Actions workflows：
 
 ```text
-.github/workflows/cargo-publish.yml
+.github/workflows/cargo-publish.yml  # 发布 crates.io 包
+.github/workflows/release.yml        # 构建并发布 GitHub Release 二进制包
 ```
+
+### crates.io 发布
 
 触发方式：
 
-- 推送到 `main`，且本项目源码、manifest、README、LICENSE 或 workflow 有变化。
+- 推送到 `main`，且本项目源码、manifest、README、LICENSE 或 `cargo-publish.yml` 有变化。
 - 手动运行 `workflow_dispatch`。
 
 发布步骤：
@@ -832,6 +835,24 @@ CARGO_REGISTRY_TOKEN
 ```
 
 这个 token 来自 crates.io 账户设置。crates.io 账户必须有已验证邮箱。之后每次要发布新包，需要先提升 `Cargo.toml` 和 `Cargo.lock` 中的版本号，再推送到 `main`。crates.io 不允许覆盖已经发布过的同一版本。
+
+### GitHub Release 二进制包
+
+触发方式：
+
+- 推送 `v*` tag，例如 `v0.11.0`。
+- 手动运行 `Build GitHub release` workflow。未填写 tag 时，默认使用 `Cargo.toml` 版本生成 `v<version>`。
+
+release workflow 会先运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test`，再为以下平台构建并上传归档：
+
+| 平台 | target | 归档 |
+| --- | --- | --- |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` |
+| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` |
+
+每个归档内包含 `tkc`、`tokencheck`、`README.md` 和 `LICENSE`。workflow 还会上传 `SHA256SUMS` 校验文件。GitHub Release 使用仓库内置的 `GITHUB_TOKEN`，不需要额外配置 secret。
 
 ## License
 
