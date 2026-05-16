@@ -16,6 +16,10 @@ pub struct AppConfig {
     pub data_file: PathBuf,
     #[serde(default, deserialize_with = "deserialize_optional_path")]
     pub pricing_file: Option<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_optional_path")]
+    pub obsidian_snapshot_file: Option<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_optional_path")]
+    pub obsidian_dashboard_file: Option<PathBuf>,
     pub limit: usize,
     pub heatmap_months: usize,
 }
@@ -37,6 +41,8 @@ impl Default for AppConfig {
             source: SourcePreference::default(),
             data_file: PathBuf::from(DEFAULT_DATA_FILE),
             pricing_file: None,
+            obsidian_snapshot_file: None,
+            obsidian_dashboard_file: None,
             limit: DEFAULT_LIMIT,
             heatmap_months: DEFAULT_HEATMAP_MONTHS,
         }
@@ -159,6 +165,20 @@ fn load_or_default_from(path: &Path) -> Result<AppConfig> {
     {
         config.pricing_file = None;
     }
+    if config
+        .obsidian_snapshot_file
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        config.obsidian_snapshot_file = None;
+    }
+    if config
+        .obsidian_dashboard_file
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        config.obsidian_dashboard_file = None;
+    }
     Ok(config)
 }
 
@@ -198,6 +218,8 @@ mod tests {
         assert_eq!(config.source, SourcePreference::All);
         assert_eq!(config.data_file.to_string_lossy(), DEFAULT_DATA_FILE);
         assert_eq!(config.pricing_file, None);
+        assert_eq!(config.obsidian_snapshot_file, None);
+        assert_eq!(config.obsidian_dashboard_file, None);
         assert_eq!(config.limit, 20);
         assert_eq!(config.heatmap_months, 12);
     }
@@ -230,6 +252,8 @@ mod tests {
         assert_eq!(config.source, SourcePreference::All);
         assert_eq!(config.data_file.to_string_lossy(), DEFAULT_DATA_FILE);
         assert_eq!(config.pricing_file, None);
+        assert_eq!(config.obsidian_snapshot_file, None);
+        assert_eq!(config.obsidian_dashboard_file, None);
         assert_eq!(config.limit, 20);
         assert_eq!(config.heatmap_months, 12);
     }
@@ -240,5 +264,16 @@ mod tests {
             serde_json::from_str::<AppConfig>(r#"{"language":"zh","pricing_file":""}"#).unwrap();
 
         assert_eq!(config.pricing_file, None);
+    }
+
+    #[test]
+    fn empty_obsidian_paths_use_none() {
+        let config = serde_json::from_str::<AppConfig>(
+            r#"{"obsidian_snapshot_file":"","obsidian_dashboard_file":""}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.obsidian_snapshot_file, None);
+        assert_eq!(config.obsidian_dashboard_file, None);
     }
 }

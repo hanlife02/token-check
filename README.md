@@ -4,7 +4,7 @@
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
 
-当前 crate 版本：`0.10.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
+当前 crate 版本：`0.11.0`。crates.io 包名为 `ethan-tkc`，安装后提供 `tkc` 和 `tokencheck` 两个命令。
 
 ## 功能概览
 
@@ -20,6 +20,7 @@
 - 支持只看 Claude Code、只看 Codex，或同时统计两者。
 - 支持 `tkc config` 交互式配置默认数据来源、快照路径、输出语言、默认行数和热力图月份数。
 - 支持 `tkc doctor` 诊断配置、快照文件和本机数据目录是否可用。
+- 支持 `tkc obsidian` 按配置生成 Obsidian Dataview Dashboard。
 - 支持英文和中文输出。
 
 ## 安装与更新
@@ -89,6 +90,13 @@ tkc config
 
 ```bash
 tkc doctor
+```
+
+生成或更新 Obsidian Dashboard：
+
+```bash
+tkc obsidian
+tkc obsidian --fetch
 ```
 
 查看最近 10 天的表格统计：
@@ -169,6 +177,7 @@ $XDG_CONFIG_HOME/tokencheck/config.json
 | `tkc config show` | 查看当前生效配置 | 检查配置文件路径和默认值 |
 | `tkc config reset` | 删除配置文件并恢复默认值 | 清空本机自定义配置 |
 | `tkc doctor` | 诊断配置、快照和本机数据目录 | 排查安装后没有数据、路径不对或快照不可读 |
+| `tkc obsidian` | 生成 Obsidian Dataview Dashboard | 在 Obsidian 中查看 token 用量报表 |
 | `tkc fetch` | 扫描本机数据并合并写入 JSON 快照 | 保存历史、换机器前备份、日志清理前归档 |
 | `tkc summary` | 输出整体统计和分来源统计 | 查看总 token、session、工具调用和估算成本 |
 | `tkc days` | 按日期聚合 token 和成本 | 看最近哪些天用量最高 |
@@ -235,6 +244,8 @@ tkc config reset
 | `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`。 |
 | `data_file` | `data/tokencheck.json` | 默认快照文件路径，也就是 `fetch` 保存和 `--from-json` 读取的位置。 |
 | `pricing_file` | 无 | 自定义价格 JSON 文件路径。输入 `none`、`null` 或 `-` 可以清空。 |
+| `obsidian_snapshot_file` | 无 | Obsidian 使用的 JSON 快照路径。`tkc obsidian --fetch` 会写入这个文件；未配置时回退到 `data_file`。 |
+| `obsidian_dashboard_file` | 无 | Obsidian Dashboard Markdown 文件路径。`tkc obsidian` 会创建或覆盖这个文件。 |
 | `limit` | `20` | 默认表格或排行行数。 |
 | `heatmap_months` | `12` | `heatmap` 默认展示月份数。 |
 
@@ -249,6 +260,8 @@ Language [en/zh] (current: en):
 Default source [all/claude/codex] (current: all):
 Snapshot data file (current: data/tokencheck.json): ~/.tokencheck/usage.json
 Custom pricing file [path/none] (current: none): ~/.tokencheck/pricing.json
+Obsidian snapshot file [path/none] (current: none): /Users/you/Vault/data/tokencheck.json
+Obsidian dashboard file [path/none] (current: none): /Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md
 Default row limit (current: 20):
 Default heatmap months (current: 12):
 
@@ -282,6 +295,44 @@ tkc summary --source codex
 tkc fetch --data-file data/one-off.json
 tkc heatmap --months 6
 ```
+
+### `tkc obsidian`
+
+`obsidian` 会根据配置生成 Obsidian DataviewJS 报表笔记。它使用两个配置项：
+
+| 配置项 | 用途 |
+| --- | --- |
+| `obsidian_snapshot_file` | DataviewJS 读取的 JSON 数据源。 |
+| `obsidian_dashboard_file` | 要创建或更新的 Markdown 报表笔记。 |
+
+示例配置：
+
+```text
+Obsidian snapshot file [path/none] (current: none): /Users/you/Vault/data/tokencheck.json
+Obsidian dashboard file [path/none] (current: none): /Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md
+```
+
+生成 Dashboard：
+
+```bash
+tkc obsidian
+```
+
+生成 Dashboard 并先更新 Obsidian 快照：
+
+```bash
+tkc obsidian --fetch
+```
+
+临时覆盖路径：
+
+```bash
+tkc obsidian \
+  --snapshot-file "/Users/you/Vault/data/tokencheck.json" \
+  --dashboard-file "/Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md"
+```
+
+生成的 Markdown 会读取 vault 内的 `data/tokencheck.json`，并展示 Summary、Recent Days、Top Models、Top Projects 和 Top Tools。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
 
 ### `tkc doctor`
 

@@ -13,6 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +29,122 @@ const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_BOLD_WHITE: &str = "\x1b[1;37m";
 const ANSI_BOLD_YELLOW: &str = "\x1b[1;33m";
 const ANSI_DIM: &str = "\x1b[2m";
+const OBSIDIAN_DASHBOARD_TEMPLATE: &str = r#"---
+type: dashboard
+source: __TOKENCHECK_SNAPSHOT_PATH__
+---
+
+# Token Usage Dashboard
+
+```dataviewjs
+const snapshotPath = "__TOKENCHECK_SNAPSHOT_PATH__";
+const number = new Intl.NumberFormat("en-US");
+
+function tokenTotal(usage = {}) {
+  return usage.total || (
+    (usage.input ?? 0) +
+    (usage.cached_input ?? 0) +
+    (usage.cache_creation_input ?? 0) +
+    (usage.output ?? 0) +
+    (usage.reasoning_output ?? 0)
+  );
+}
+
+function compact(value) {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return number.format(value);
+}
+
+function groupBy(items, keyFn, valueFn) {
+  const map = new Map();
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || key.includes("unknown")) continue;
+    map.set(key, (map.get(key) ?? 0) + valueFn(item));
+  }
+  return [...map.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function bar(value, max, width = 18) {
+  if (!max) return "";
+  const filled = Math.max(1, Math.round((value / max) * width));
+  return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
+}
+
+try {
+  const raw = await app.vault.adapter.read(snapshotPath);
+  const data = JSON.parse(raw);
+  const sessions = data.sessions ?? [];
+  const usageEvents = data.usage_events ?? [];
+  const toolEvents = data.tool_events ?? [];
+  const totalTokens = usageEvents.reduce((sum, event) => sum + tokenTotal(event.usage), 0);
+  const projectCount = new Set(
+    [...sessions, ...usageEvents].map((item) => item.project).filter((value) => value && value !== "unknown")
+  ).size;
+  const modelCount = new Set(
+    [...sessions, ...usageEvents].map((item) => item.model).filter((value) => value && value !== "unknown")
+  ).size;
+
+  dv.header(2, "Summary");
+  dv.table(
+    ["Metric", "Value"],
+    [
+      ["Sessions", number.format(sessions.length)],
+      ["Usage events", number.format(usageEvents.length)],
+      ["Tool calls", number.format(toolEvents.length)],
+      ["Projects", number.format(projectCount)],
+      ["Models", number.format(modelCount)],
+      ["Total tokens", compact(totalTokens)],
+      ["Snapshot", snapshotPath],
+    ]
+  );
+
+  const dailyTokens = groupBy(usageEvents, (event) => event.date, (event) => tokenTotal(event.usage));
+  const dailySessions = new Map();
+  for (const session of sessions) {
+    if (!session.date || session.date === "unknown") continue;
+    const ids = dailySessions.get(session.date) ?? new Set();
+    ids.add(`${session.source}:${session.session_id}`);
+    dailySessions.set(session.date, ids);
+  }
+  const recentDays = dailyTokens.sort((a, b) => b[0].localeCompare(a[0])).slice(0, 30);
+  const maxDaily = Math.max(...recentDays.map(([, tokens]) => tokens), 0);
+  dv.header(2, "Recent Days");
+  dv.table(
+    ["Date", "Sessions", "Tokens", "Trend"],
+    recentDays.map(([date, tokens]) => [
+      date,
+      number.format(dailySessions.get(date)?.size ?? 0),
+      compact(tokens),
+      bar(tokens, maxDaily),
+    ])
+  );
+
+  const topModels = groupBy(
+    usageEvents,
+    (event) => `${event.source}/${event.model}`,
+    (event) => tokenTotal(event.usage)
+  ).slice(0, 15);
+  const maxModel = Math.max(...topModels.map(([, tokens]) => tokens), 0);
+  dv.header(2, "Top Models");
+  dv.table(["Model", "Tokens", "Share"], topModels.map(([model, tokens]) => [model, compact(tokens), bar(tokens, maxModel)]));
+
+  const topProjects = groupBy(usageEvents, (event) => event.project, (event) => tokenTotal(event.usage)).slice(0, 15);
+  const maxProject = Math.max(...topProjects.map(([, tokens]) => tokens), 0);
+  dv.header(2, "Top Projects");
+  dv.table(["Project", "Tokens", "Share"], topProjects.map(([project, tokens]) => [project, compact(tokens), bar(tokens, maxProject)]));
+
+  const topTools = groupBy(toolEvents, (event) => `${event.source}/${event.tool}`, () => 1).slice(0, 15);
+  const maxTool = Math.max(...topTools.map(([, calls]) => calls), 0);
+  dv.header(2, "Top Tools");
+  dv.table(["Tool", "Calls", "Share"], topTools.map(([tool, calls]) => [tool, number.format(calls), bar(calls, maxTool)]));
+} catch (error) {
+  dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
+}
+```
+"#;
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -95,6 +212,23 @@ enum Command {
     },
     #[command(about = "Diagnose config, snapshot, and local data availability")]
     Doctor,
+    #[command(about = "Write an Obsidian Dataview dashboard from configured paths")]
+    Obsidian {
+        #[arg(
+            long,
+            help = "Scan and update the Obsidian snapshot before writing the dashboard"
+        )]
+        fetch: bool,
+
+        #[arg(long, help = "Override the configured Obsidian snapshot JSON file")]
+        snapshot_file: Option<PathBuf>,
+
+        #[arg(
+            long,
+            help = "Override the configured Obsidian dashboard Markdown file"
+        )]
+        dashboard_file: Option<PathBuf>,
+    },
     #[command(about = "Rank usage by project path")]
     Projects,
     #[command(about = "Rank usage and estimated cost by model")]
@@ -275,6 +409,23 @@ pub fn run() -> Result<()> {
             settings.language,
         );
     }
+    if let Command::Obsidian {
+        fetch,
+        snapshot_file,
+        dashboard_file,
+    } = &command
+    {
+        let snapshot_file = resolve_obsidian_snapshot_file(snapshot_file, &app_config, &settings)?;
+        let dashboard_file = resolve_obsidian_dashboard_file(dashboard_file, &app_config)?;
+        return run_obsidian(
+            settings.source,
+            home,
+            snapshot_file,
+            dashboard_file,
+            *fetch,
+            settings.language,
+        );
+    }
 
     let shows_cost = command.shows_cost();
     let pricing = if shows_cost {
@@ -300,6 +451,7 @@ pub fn run() -> Result<()> {
             &pricing,
         ),
         Command::Doctor => unreachable!("doctor returns before report rendering"),
+        Command::Obsidian { .. } => unreachable!("obsidian returns before report rendering"),
         Command::Projects => print_projects(&data, settings.limit, settings.language, &pricing),
         Command::Models => print_models(&data, settings.limit, settings.language, &pricing),
         Command::Tools => print_tools(&data, settings.limit, settings.language),
@@ -348,6 +500,16 @@ fn run_config_interactive(mut app_config: AppConfig) -> Result<()> {
         app_config.language,
         label_config_pricing_file(app_config.language),
         app_config.pricing_file.as_deref(),
+    )?;
+    app_config.obsidian_snapshot_file = prompt_optional_path(
+        app_config.language,
+        label_config_obsidian_snapshot_file(app_config.language),
+        app_config.obsidian_snapshot_file.as_deref(),
+    )?;
+    app_config.obsidian_dashboard_file = prompt_optional_path(
+        app_config.language,
+        label_config_obsidian_dashboard_file(app_config.language),
+        app_config.obsidian_dashboard_file.as_deref(),
     )?;
     app_config.limit = prompt_positive_usize(
         app_config.language,
@@ -400,6 +562,16 @@ fn print_config(app_config: AppConfig) -> Result<()> {
         label_config_pricing_file(language),
         format_optional_path(app_config.pricing_file.as_deref(), language)
     );
+    println!(
+        "{}: {}",
+        label_config_obsidian_snapshot_file(language),
+        format_optional_path(app_config.obsidian_snapshot_file.as_deref(), language)
+    );
+    println!(
+        "{}: {}",
+        label_config_obsidian_dashboard_file(language),
+        format_optional_path(app_config.obsidian_dashboard_file.as_deref(), language)
+    );
     println!("{}: {}", label_config_limit(language), app_config.limit);
     println!(
         "{}: {}",
@@ -428,6 +600,122 @@ fn load_pricing(pricing_file: Option<&Path>) -> Result<billing::Pricing> {
         Some(path) => billing::Pricing::load(path),
         None => Ok(billing::Pricing::default()),
     }
+}
+
+fn resolve_obsidian_snapshot_file(
+    override_path: &Option<PathBuf>,
+    app_config: &AppConfig,
+    settings: &EffectiveSettings,
+) -> Result<PathBuf> {
+    let path = override_path
+        .clone()
+        .or_else(|| app_config.obsidian_snapshot_file.clone())
+        .unwrap_or_else(|| settings.data_file.clone());
+    expand_home_path(path)
+}
+
+fn resolve_obsidian_dashboard_file(
+    override_path: &Option<PathBuf>,
+    app_config: &AppConfig,
+) -> Result<PathBuf> {
+    let path = override_path
+        .clone()
+        .or_else(|| app_config.obsidian_dashboard_file.clone())
+        .ok_or_else(|| anyhow!("Obsidian dashboard file is not configured; run tkc config"))?;
+    expand_home_path(path)
+}
+
+fn run_obsidian(
+    filter: SourceFilter,
+    home: Option<PathBuf>,
+    snapshot_file: PathBuf,
+    dashboard_file: PathBuf,
+    fetch: bool,
+    language: Language,
+) -> Result<()> {
+    if fetch {
+        run_fetch(filter, home, snapshot_file.clone(), language)?;
+        println!();
+    }
+
+    write_obsidian_dashboard(&snapshot_file, &dashboard_file)?;
+    println!(
+        "{}: {}",
+        label_obsidian_dashboard_saved(language),
+        dashboard_file.display()
+    );
+    println!(
+        "{}: {}",
+        label_config_obsidian_snapshot_file(language),
+        snapshot_file.display()
+    );
+    if !snapshot_file.exists() {
+        eprintln!(
+            "{}: {}",
+            label_obsidian_snapshot_missing(language),
+            snapshot_file.display()
+        );
+    }
+    Ok(())
+}
+
+fn write_obsidian_dashboard(snapshot_file: &Path, dashboard_file: &Path) -> Result<()> {
+    if let Some(parent) = dashboard_file.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let content = obsidian_dashboard_markdown(snapshot_file, dashboard_file);
+    fs::write(dashboard_file, content)
+        .with_context(|| format!("write {}", dashboard_file.display()))
+}
+
+fn obsidian_dashboard_markdown(snapshot_file: &Path, dashboard_file: &Path) -> String {
+    let snapshot_path = obsidian_dataview_snapshot_path(snapshot_file, dashboard_file);
+    OBSIDIAN_DASHBOARD_TEMPLATE.replace(
+        "__TOKENCHECK_SNAPSHOT_PATH__",
+        &escape_javascript_string(&snapshot_path),
+    )
+}
+
+fn obsidian_dataview_snapshot_path(snapshot_file: &Path, dashboard_file: &Path) -> String {
+    if snapshot_file.is_relative() {
+        return path_to_slash_string(snapshot_file);
+    }
+    if let Some(vault_root) = obsidian_vault_root(dashboard_file) {
+        if let Ok(relative) = snapshot_file.strip_prefix(vault_root) {
+            return path_to_slash_string(relative);
+        }
+    }
+    path_to_slash_string(snapshot_file)
+}
+
+fn obsidian_vault_root(dashboard_file: &Path) -> Option<PathBuf> {
+    let mut current = dashboard_file.parent();
+    while let Some(dir) = current {
+        if dir.join(".obsidian").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn path_to_slash_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn escape_javascript_string(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn run_doctor(
@@ -843,6 +1131,18 @@ fn label_config_already_default(language: Language) -> &'static str {
     text(language, "config already default", "配置已经是默认值")
 }
 
+fn label_obsidian_dashboard_saved(language: Language) -> &'static str {
+    text(language, "Obsidian dashboard saved", "Obsidian 报表已保存")
+}
+
+fn label_obsidian_snapshot_missing(language: Language) -> &'static str {
+    text(
+        language,
+        "Obsidian snapshot is missing; run tkc obsidian --fetch or tkc fetch",
+        "Obsidian 快照不存在；请运行 tkc obsidian --fetch 或 tkc fetch",
+    )
+}
+
 fn label_config_status(language: Language) -> &'static str {
     text(language, "Status", "状态")
 }
@@ -869,6 +1169,14 @@ fn label_config_data_file(language: Language) -> &'static str {
 
 fn label_config_pricing_file(language: Language) -> &'static str {
     text(language, "Custom pricing file", "自定义价格文件")
+}
+
+fn label_config_obsidian_snapshot_file(language: Language) -> &'static str {
+    text(language, "Obsidian snapshot file", "Obsidian 快照文件")
+}
+
+fn label_config_obsidian_dashboard_file(language: Language) -> &'static str {
+    text(language, "Obsidian dashboard file", "Obsidian 报表文件")
 }
 
 fn label_config_limit(language: Language) -> &'static str {
@@ -2496,12 +2804,14 @@ mod tests {
     use super::{
         apply_date_filter, describe_counts, display_width, fit_histogram_label, format_cost,
         format_dollars, format_number, heatmap_level, histogram_height, localized_warning,
-        max_heatmap_weeks, max_histogram_columns, parse_date_filter_value, parse_terminal_width,
+        max_heatmap_weeks, max_histogram_columns, obsidian_dashboard_markdown,
+        obsidian_dataview_snapshot_path, parse_date_filter_value, parse_terminal_width,
         source_filter_includes, truncate_visible, CivilDate, DataCounts, DateFilter, SourceFilter,
     };
     use crate::billing::Cost;
     use crate::config::Language;
     use crate::model::{ReportData, SessionMeta, Source, ToolEvent, Usage, UsageEvent};
+    use std::path::Path;
 
     #[test]
     fn formats_numbers_with_compact_units() {
@@ -2639,6 +2949,28 @@ mod tests {
         assert_eq!(
             describe_counts(counts, Language::Zh),
             "2 会话, 3 用量事件, 4 工具调用, 12.3k 总 token"
+        );
+    }
+
+    #[test]
+    fn builds_obsidian_dashboard_with_configured_snapshot_path() {
+        let markdown = obsidian_dashboard_markdown(
+            Path::new("data/tokencheck.json"),
+            Path::new("2 - Docs/token-check/Token Usage Dashboard.md"),
+        );
+
+        assert!(markdown.contains("source: data/tokencheck.json"));
+        assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
+    }
+
+    #[test]
+    fn uses_relative_obsidian_snapshot_paths_directly() {
+        assert_eq!(
+            obsidian_dataview_snapshot_path(
+                Path::new("data/tokencheck.json"),
+                Path::new("2 - Docs/token-check/Token Usage Dashboard.md"),
+            ),
+            "data/tokencheck.json"
         );
     }
 
