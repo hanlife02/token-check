@@ -8,7 +8,13 @@ pub mod model;
 pub mod snapshot;
 
 use crate::config::{AppConfig, Language, SourcePreference};
+use crate::date::{
+    days_in_month, month_abbr, parse_date_filter_value, today_utc, weekday_label, CivilDate,
+};
 use crate::model::{ReportData, Roots, Source, Usage};
+use crate::render::{
+    bold_yellow, center_visible, dim, print_rounded_panel, print_table, terminal_panel_width,
+};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,135 +22,15 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use terminal_size::{terminal_size, Width};
 
-const DEFAULT_TERMINAL_WIDTH: usize = 100;
+mod date;
+mod render;
+
 const HISTOGRAM_COLUMN_WIDTH: usize = 6;
 const HISTOGRAM_HEIGHT: usize = 10;
 const HEATMAP_LABEL_WIDTH: usize = 8;
 const HEATMAP_WEEK_WIDTH: usize = 3;
-const ANSI_RESET: &str = "\x1b[0m";
-const ANSI_CYAN: &str = "\x1b[36m";
-const ANSI_BOLD_WHITE: &str = "\x1b[1;37m";
-const ANSI_BOLD_YELLOW: &str = "\x1b[1;33m";
-const ANSI_DIM: &str = "\x1b[2m";
-const OBSIDIAN_DASHBOARD_TEMPLATE: &str = r#"---
-type: dashboard
-source: __TOKENCHECK_SNAPSHOT_PATH__
----
-
-# Token Usage Dashboard
-
-```dataviewjs
-const snapshotPath = "__TOKENCHECK_SNAPSHOT_PATH__";
-const number = new Intl.NumberFormat("en-US");
-
-function tokenTotal(usage = {}) {
-  return usage.total || (
-    (usage.input ?? 0) +
-    (usage.cached_input ?? 0) +
-    (usage.cache_creation_input ?? 0) +
-    (usage.output ?? 0) +
-    (usage.reasoning_output ?? 0)
-  );
-}
-
-function compact(value) {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return number.format(value);
-}
-
-function groupBy(items, keyFn, valueFn) {
-  const map = new Map();
-  for (const item of items) {
-    const key = keyFn(item);
-    if (!key || key.includes("unknown")) continue;
-    map.set(key, (map.get(key) ?? 0) + valueFn(item));
-  }
-  return [...map.entries()].sort((a, b) => b[1] - a[1]);
-}
-
-function bar(value, max, width = 18) {
-  if (!max) return "";
-  const filled = Math.max(1, Math.round((value / max) * width));
-  return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
-}
-
-try {
-  const raw = await app.vault.adapter.read(snapshotPath);
-  const data = JSON.parse(raw);
-  const sessions = data.sessions ?? [];
-  const usageEvents = data.usage_events ?? [];
-  const toolEvents = data.tool_events ?? [];
-  const totalTokens = usageEvents.reduce((sum, event) => sum + tokenTotal(event.usage), 0);
-  const projectCount = new Set(
-    [...sessions, ...usageEvents].map((item) => item.project).filter((value) => value && value !== "unknown")
-  ).size;
-  const modelCount = new Set(
-    [...sessions, ...usageEvents].map((item) => item.model).filter((value) => value && value !== "unknown")
-  ).size;
-
-  dv.header(2, "Summary");
-  dv.table(
-    ["Metric", "Value"],
-    [
-      ["Sessions", number.format(sessions.length)],
-      ["Usage events", number.format(usageEvents.length)],
-      ["Tool calls", number.format(toolEvents.length)],
-      ["Projects", number.format(projectCount)],
-      ["Models", number.format(modelCount)],
-      ["Total tokens", compact(totalTokens)],
-      ["Snapshot", snapshotPath],
-    ]
-  );
-
-  const dailyTokens = groupBy(usageEvents, (event) => event.date, (event) => tokenTotal(event.usage));
-  const dailySessions = new Map();
-  for (const session of sessions) {
-    if (!session.date || session.date === "unknown") continue;
-    const ids = dailySessions.get(session.date) ?? new Set();
-    ids.add(`${session.source}:${session.session_id}`);
-    dailySessions.set(session.date, ids);
-  }
-  const recentDays = dailyTokens.sort((a, b) => b[0].localeCompare(a[0])).slice(0, 30);
-  const maxDaily = Math.max(...recentDays.map(([, tokens]) => tokens), 0);
-  dv.header(2, "Recent Days");
-  dv.table(
-    ["Date", "Sessions", "Tokens", "Trend"],
-    recentDays.map(([date, tokens]) => [
-      date,
-      number.format(dailySessions.get(date)?.size ?? 0),
-      compact(tokens),
-      bar(tokens, maxDaily),
-    ])
-  );
-
-  const topModels = groupBy(
-    usageEvents,
-    (event) => `${event.source}/${event.model}`,
-    (event) => tokenTotal(event.usage)
-  ).slice(0, 15);
-  const maxModel = Math.max(...topModels.map(([, tokens]) => tokens), 0);
-  dv.header(2, "Top Models");
-  dv.table(["Model", "Tokens", "Share"], topModels.map(([model, tokens]) => [model, compact(tokens), bar(tokens, maxModel)]));
-
-  const topProjects = groupBy(usageEvents, (event) => event.project, (event) => tokenTotal(event.usage)).slice(0, 15);
-  const maxProject = Math.max(...topProjects.map(([, tokens]) => tokens), 0);
-  dv.header(2, "Top Projects");
-  dv.table(["Project", "Tokens", "Share"], topProjects.map(([project, tokens]) => [project, compact(tokens), bar(tokens, maxProject)]));
-
-  const topTools = groupBy(toolEvents, (event) => `${event.source}/${event.tool}`, () => 1).slice(0, 15);
-  const maxTool = Math.max(...topTools.map(([, calls]) => calls), 0);
-  dv.header(2, "Top Tools");
-  dv.table(["Tool", "Calls", "Share"], topTools.map(([tool, calls]) => [tool, number.format(calls), bar(calls, maxTool)]));
-} catch (error) {
-  dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
-}
-```
-"#;
+const OBSIDIAN_DASHBOARD_TEMPLATE: &str = include_str!("../assets/obsidian-dashboard.md");
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -2291,83 +2177,6 @@ fn unique_sessions(data: &ReportData, source: Option<Source>) -> usize {
         .len()
 }
 
-fn print_table(headers: &[&str], rows: &[Vec<String>]) {
-    let mut widths = headers
-        .iter()
-        .map(|header| display_width(header))
-        .collect::<Vec<_>>();
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(display_width(cell));
-        }
-    }
-
-    print_row(
-        headers.iter().map(|cell| cell.to_string()).collect(),
-        &widths,
-    );
-    let separator = widths
-        .iter()
-        .map(|width| "-".repeat(*width))
-        .collect::<Vec<_>>();
-    print_row(separator, &widths);
-    for row in rows {
-        print_row(row.clone(), &widths);
-    }
-}
-
-fn print_row(row: Vec<String>, widths: &[usize]) {
-    for (index, cell) in row.iter().enumerate() {
-        if index > 0 {
-            print!("  ");
-        }
-        let padding = widths[index].saturating_sub(display_width(cell));
-        print!("{cell}{}", " ".repeat(padding));
-    }
-    println!();
-}
-
-fn display_width(value: &str) -> usize {
-    let mut width = 0;
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for sequence_ch in chars.by_ref() {
-                if sequence_ch.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            width += char_display_width(ch);
-        }
-    }
-    width
-}
-
-fn char_display_width(ch: char) -> usize {
-    if ch.is_control() {
-        return 0;
-    }
-    let code = ch as u32;
-    if matches!(
-        code,
-        0x1100..=0x115F
-            | 0x2329..=0x232A
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE19
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-    ) {
-        2
-    } else {
-        1
-    }
-}
-
 fn histogram_label_row<'a>(
     columns: &[HistogramColumn<'a>],
     axis_width: usize,
@@ -2406,216 +2215,12 @@ fn format_histogram_cost(cost: billing::Cost) -> String {
     fit_histogram_label(&out, HISTOGRAM_COLUMN_WIDTH.saturating_sub(1).max(1))
 }
 
-fn center_visible(value: &str, width: usize) -> String {
-    let value_width = display_width(value);
-    if value_width >= width {
-        return value.to_string();
-    }
-    let padding = width - value_width;
-    let left = padding / 2;
-    let right = padding - left;
-    format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
-}
-
-fn pad_right_visible(value: &str, width: usize) -> String {
-    format!(
-        "{}{}",
-        value,
-        " ".repeat(width.saturating_sub(display_width(value)))
-    )
-}
-
-fn print_rounded_panel(title: &str, lines: &[String]) {
-    let panel_width = terminal_panel_width();
-    let inner_limit = panel_width.saturating_sub(4);
-    let title_width = display_width(title) + 2;
-    let inner_width = lines
-        .iter()
-        .map(|line| display_width(line))
-        .max()
-        .unwrap_or(0)
-        .max(title_width + 1)
-        .min(inner_limit);
-    let border_width = inner_width + 2;
-    let top_width = border_width + 2;
-    let title_label = if top_width > 6 {
-        truncate_visible(&format!(" {title} "), top_width.saturating_sub(3))
-    } else {
-        String::new()
-    };
-    let title_label_width = display_width(&title_label);
-    let fill_width = top_width.saturating_sub(title_label_width + 3);
-
-    println!(
-        "{ANSI_CYAN}╭─{ANSI_BOLD_WHITE}{title_label}{ANSI_RESET}{ANSI_CYAN}{}╮{ANSI_RESET}",
-        "─".repeat(fill_width)
-    );
-    for line in lines {
-        let line = truncate_visible(line, inner_width);
-        println!(
-            "{ANSI_CYAN}│{ANSI_RESET} {} {ANSI_CYAN}│{ANSI_RESET}",
-            pad_right_visible(&line, inner_width)
-        );
-    }
-    println!("{ANSI_CYAN}╰{}╯{ANSI_RESET}", "─".repeat(border_width));
-}
-
-fn truncate_visible(value: &str, width: usize) -> String {
-    if display_width(value) <= width {
-        return value.to_string();
-    }
-
-    let mut out = String::new();
-    let mut visible_width = 0;
-    let mut saw_escape = false;
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            saw_escape = true;
-            out.push(ch);
-            out.push(chars.next().unwrap_or('['));
-            for sequence_ch in chars.by_ref() {
-                out.push(sequence_ch);
-                if sequence_ch.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-            continue;
-        }
-        if visible_width >= width {
-            break;
-        }
-        let ch_width = char_display_width(ch);
-        if visible_width + ch_width > width {
-            break;
-        }
-        out.push(ch);
-        visible_width += ch_width;
-    }
-    if saw_escape {
-        out.push_str(ANSI_RESET);
-    }
-    out
-}
-
-fn terminal_panel_width() -> usize {
-    detected_terminal_width()
-        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
-        .saturating_sub(1)
-        .max(4)
-}
-
-fn detected_terminal_width() -> Option<usize> {
-    env::var("COLUMNS")
-        .ok()
-        .and_then(|value| parse_terminal_width(&value))
-        .or_else(native_terminal_width)
-}
-
-fn native_terminal_width() -> Option<usize> {
-    let (Width(width), _) = terminal_size()?;
-    Some(usize::from(width))
-}
-
-fn parse_terminal_width(value: &str) -> Option<usize> {
-    value
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|width| *width > 0)
-}
-
 fn histogram_height(value: u64, max_value: u64, height: usize) -> usize {
     if value == 0 || max_value == 0 || height == 0 {
         return 0;
     }
     let filled = ((value as u128) * (height as u128)).div_ceil(max_value as u128) as usize;
     filled.max(1).min(height)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct CivilDate {
-    year: i32,
-    month: u8,
-    day: u8,
-}
-
-impl CivilDate {
-    fn parse(value: &str) -> Option<Self> {
-        if value.len() != 10 {
-            return None;
-        }
-        let year = value.get(0..4)?.parse::<i32>().ok()?;
-        let month = value.get(5..7)?.parse::<u8>().ok()?;
-        let day = value.get(8..10)?.parse::<u8>().ok()?;
-        if value.as_bytes().get(4) != Some(&b'-') || value.as_bytes().get(7) != Some(&b'-') {
-            return None;
-        }
-        if !(1..=12).contains(&month) || !(1..=days_in_month(year, month)).contains(&day) {
-            return None;
-        }
-        Some(Self { year, month, day })
-    }
-
-    fn month_index(self) -> i32 {
-        self.year * 12 + i32::from(self.month) - 1
-    }
-
-    fn from_month_index(index: i32) -> (i32, u8) {
-        let year = index.div_euclid(12);
-        let month = index.rem_euclid(12) + 1;
-        (year, month as u8)
-    }
-
-    fn days_since_epoch(self) -> i64 {
-        days_from_civil(self.year, self.month, self.day)
-    }
-
-    fn add_days(self, days: i64) -> Self {
-        civil_from_days(self.days_since_epoch() + days)
-    }
-
-    fn weekday_sunday_index(self) -> usize {
-        let days = days_from_civil(self.year, self.month, self.day);
-        (days + 4).rem_euclid(7) as usize
-    }
-}
-
-impl std::fmt::Display for CivilDate {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{:04}-{:02}-{:02}",
-            self.year, self.month, self.day
-        )
-    }
-}
-
-fn parse_date_filter_value(value: &str, today: CivilDate) -> Result<CivilDate> {
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("today") {
-        return Ok(today);
-    }
-    if let Some(days) = value.strip_suffix('d').or_else(|| value.strip_suffix('D')) {
-        let days = days
-            .parse::<i64>()
-            .with_context(|| format!("parse relative date filter {value:?}"))?;
-        if days < 0 {
-            return Err(anyhow!("relative date filters must be non-negative"));
-        }
-        return Ok(today.add_days(-days));
-    }
-    CivilDate::parse(value).ok_or_else(|| {
-        anyhow!("invalid date filter {value:?}; use YYYY-MM-DD, today, or a relative value like 7d")
-    })
-}
-
-fn today_utc() -> Result<CivilDate> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| anyhow!("system time is before Unix epoch: {err}"))?;
-    let days = (duration.as_secs() / 86_400) as i64;
-    Ok(civil_from_days(days))
 }
 
 fn heatmap_cell(usage: u64, max_usage: u64) -> String {
@@ -2657,90 +2262,6 @@ fn heatmap_legend_line(language: Language) -> String {
     line.push(' ');
     line.push_str(&dim(label_more(language)));
     line
-}
-
-fn bold_yellow(value: &str) -> String {
-    format!("{ANSI_BOLD_YELLOW}{value}{ANSI_RESET}")
-}
-
-fn dim(value: &str) -> String {
-    format!("{ANSI_DIM}{value}{ANSI_RESET}")
-}
-
-fn month_abbr(month: u8) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "   ",
-    }
-}
-
-fn weekday_label(weekday: usize) -> &'static str {
-    match weekday {
-        0 => "Sun",
-        1 => "Mon",
-        2 => "Tue",
-        3 => "Wed",
-        4 => "Thu",
-        5 => "Fri",
-        6 => "Sat",
-        _ => "",
-    }
-}
-
-fn days_in_month(year: i32, month: u8) -> u8 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
-    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-fn civil_from_days(days: i64) -> CivilDate {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-
-    CivilDate {
-        year: year as i32,
-        month: month as u8,
-        day: day as u8,
-    }
 }
 
 fn format_number(value: u64) -> String {
@@ -2802,11 +2323,10 @@ fn home_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_date_filter, describe_counts, display_width, fit_histogram_label, format_cost,
-        format_dollars, format_number, heatmap_level, histogram_height, localized_warning,
-        max_heatmap_weeks, max_histogram_columns, obsidian_dashboard_markdown,
-        obsidian_dataview_snapshot_path, parse_date_filter_value, parse_terminal_width,
-        source_filter_includes, truncate_visible, CivilDate, DataCounts, DateFilter, SourceFilter,
+        apply_date_filter, describe_counts, fit_histogram_label, format_cost, format_dollars,
+        format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
+        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dataview_snapshot_path,
+        source_filter_includes, CivilDate, DataCounts, DateFilter, SourceFilter,
     };
     use crate::billing::Cost;
     use crate::config::Language;
@@ -2842,46 +2362,6 @@ mod tests {
             }),
             "$1.23*"
         );
-    }
-
-    #[test]
-    fn parses_valid_calendar_dates() {
-        assert_eq!(
-            CivilDate::parse("2026-05-13"),
-            Some(CivilDate {
-                year: 2026,
-                month: 5,
-                day: 13
-            })
-        );
-        assert_eq!(CivilDate::parse("2026-02-29"), None);
-        assert_eq!(CivilDate::parse("2026-05-13-extra"), None);
-        assert_eq!(
-            CivilDate::parse("2024-02-29"),
-            Some(CivilDate {
-                year: 2024,
-                month: 2,
-                day: 29
-            })
-        );
-    }
-
-    #[test]
-    fn parses_absolute_and_relative_date_filters() {
-        let today = CivilDate::parse("2026-05-16").unwrap();
-        assert_eq!(
-            parse_date_filter_value("2026-05-01", today).unwrap(),
-            CivilDate::parse("2026-05-01").unwrap()
-        );
-        assert_eq!(
-            parse_date_filter_value("today", today).unwrap(),
-            CivilDate::parse("2026-05-16").unwrap()
-        );
-        assert_eq!(
-            parse_date_filter_value("7d", today).unwrap(),
-            CivilDate::parse("2026-05-09").unwrap()
-        );
-        assert!(parse_date_filter_value("bad", today).is_err());
     }
 
     #[test]
@@ -2975,48 +2455,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_weekday_with_sunday_origin() {
-        assert_eq!(
-            CivilDate::parse("2026-05-10")
-                .unwrap()
-                .weekday_sunday_index(),
-            0
-        );
-        assert_eq!(
-            CivilDate::parse("2026-05-13")
-                .unwrap()
-                .weekday_sunday_index(),
-            3
-        );
-        assert_eq!(
-            CivilDate::parse("2026-05-16")
-                .unwrap()
-                .weekday_sunday_index(),
-            6
-        );
-    }
-
-    #[test]
-    fn adds_days_across_month_boundaries() {
-        assert_eq!(
-            CivilDate::parse("2026-03-01").unwrap().add_days(-1),
-            CivilDate {
-                year: 2026,
-                month: 2,
-                day: 28
-            }
-        );
-        assert_eq!(
-            CivilDate::parse("2024-02-28").unwrap().add_days(1),
-            CivilDate {
-                year: 2024,
-                month: 2,
-                day: 29
-            }
-        );
-    }
-
-    #[test]
     fn maps_usage_to_heatmap_levels() {
         assert_eq!(heatmap_level(0, 100), 0);
         assert_eq!(heatmap_level(1, 100), 1);
@@ -3041,33 +2479,9 @@ mod tests {
     }
 
     #[test]
-    fn measures_ansi_styled_display_width() {
-        assert_eq!(display_width("\x1b[38;5;46m██\x1b[0m"), 2);
-        assert_eq!(display_width("\x1b[2mLess\x1b[0m"), 4);
-        assert_eq!(display_width("配置"), 4);
-    }
-
-    #[test]
-    fn truncates_ansi_styled_text_by_visible_width() {
-        let value = truncate_visible("\x1b[2mabcdef\x1b[0m", 3);
-        assert_eq!(display_width(&value), 3);
-        assert!(value.ends_with("\x1b[0m"));
-
-        let value = truncate_visible("配置文件", 5);
-        assert_eq!(value, "配置");
-    }
-
-    #[test]
     fn calculates_chart_columns_from_available_width() {
         assert_eq!(max_histogram_columns(41, 4), 5);
         assert_eq!(max_heatmap_weeks(44), 12);
-    }
-
-    #[test]
-    fn parses_terminal_width_values() {
-        assert_eq!(parse_terminal_width("80\n"), Some(80));
-        assert_eq!(parse_terminal_width("0"), None);
-        assert_eq!(parse_terminal_width("wide"), None);
     }
 
     #[test]
