@@ -1,6 +1,6 @@
 ---
 name: tokencheck
-description: "Use when the user asks how to install, configure, run, troubleshoot, or integrate the tokencheck/tkc CLI for local Claude Code and Codex token usage reports, snapshots, pricing, terminal charts, or Obsidian dashboards."
+description: "Use when the user asks how to install, configure, run, troubleshoot, or integrate the tokencheck/tkc CLI for local Claude Code, Codex, and OpenCode token usage reports, snapshots, pricing, terminal charts, or Obsidian dashboards."
 ---
 
 # Tokencheck
@@ -75,6 +75,7 @@ Source filters:
 ```bash
 tkc summary --source claude
 tkc models --source codex
+tkc days --source opencode
 ```
 
 Date filters are inclusive and affect report commands only:
@@ -111,7 +112,7 @@ Blank input keeps and saves the current value. `none`, `null`, or `-` clears opt
 
 Important config fields:
 
-- `source`: default data source, one of `all`, `claude`, or `codex`.
+- `source`: default data source, one of `all`, `claude`, `codex`, or `opencode`.
 - `data_file`: default JSON snapshot path used by `fetch` and `--from-json`.
 - `pricing_file`: optional custom pricing JSON.
 - `obsidian_snapshot_file`: JSON snapshot path for Obsidian integration.
@@ -189,6 +190,7 @@ Common fixes:
 
 - Missing Claude data: confirm `$HOME/.claude/projects` exists or pass `--home`.
 - Missing Codex data: confirm `$HOME/.codex/sessions` exists or pass `--home`.
+- Missing OpenCode data: confirm `$HOME/.local/share/opencode` exists or pass `--home`.
 - No saved history: run `tkc fetch`.
 - Obsidian dashboard missing data: run `tkc obsidian --fetch`, then reopen or refresh the note.
 - JSON file is hidden in Obsidian: enable `Files and links -> Detect all file extensions`, or use the Dashboard Markdown instead of opening JSON directly.

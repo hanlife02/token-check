@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub enum Source {
     Claude,
     Codex,
+    OpenCode,
 }
 
 impl Source {
@@ -14,6 +15,7 @@ impl Source {
         match self {
             Source::Claude => "claude",
             Source::Codex => "codex",
+            Source::OpenCode => "opencode",
         }
     }
 }
@@ -121,6 +123,10 @@ impl Roots {
 
     pub fn codex_sessions(&self) -> PathBuf {
         self.home.join(".codex").join("sessions")
+    }
+
+    pub fn opencode_root(&self) -> PathBuf {
+        self.home.join(".local").join("share").join("opencode")
     }
 }
 

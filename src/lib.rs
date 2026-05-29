@@ -5,6 +5,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod config;
 pub mod model;
+pub mod opencode;
 pub mod snapshot;
 
 use crate::config::{AppConfig, Language, SourcePreference};
@@ -34,7 +35,7 @@ const OBSIDIAN_DASHBOARD_TEMPLATE: &str = include_str!("../assets/obsidian-dashb
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
-#[command(about = "Local Claude Code and Codex usage stats")]
+#[command(about = "Local Claude Code, Codex, and OpenCode usage stats")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -145,6 +146,8 @@ enum SourceFilter {
     All,
     Claude,
     Codex,
+    #[value(name = "opencode", alias = "open-code", alias = "oc")]
+    OpenCode,
 }
 
 impl From<SourcePreference> for SourceFilter {
@@ -153,6 +156,7 @@ impl From<SourcePreference> for SourceFilter {
             SourcePreference::All => SourceFilter::All,
             SourcePreference::Claude => SourceFilter::Claude,
             SourcePreference::Codex => SourceFilter::Codex,
+            SourcePreference::OpenCode => SourceFilter::OpenCode,
         }
     }
 }
@@ -163,6 +167,7 @@ impl From<SourceFilter> for SourcePreference {
             SourceFilter::All => SourcePreference::All,
             SourceFilter::Claude => SourcePreference::Claude,
             SourceFilter::Codex => SourcePreference::Codex,
+            SourceFilter::OpenCode => SourcePreference::OpenCode,
         }
     }
 }
@@ -173,6 +178,7 @@ impl SourceFilter {
             SourceFilter::All => "all",
             SourceFilter::Claude => "claude",
             SourceFilter::Codex => "codex",
+            SourceFilter::OpenCode => "opencode",
         }
     }
 }
@@ -649,6 +655,14 @@ fn run_doctor(
             describe_path_status(&path, language),
         ));
     }
+    if source_filter_includes(filter, Source::OpenCode) {
+        let path = roots.opencode_root();
+        rows.push(doctor_row(
+            label_opencode_data_dir(language),
+            path.exists(),
+            describe_path_status(&path, language),
+        ));
+    }
 
     let mut snapshot_has_usage = false;
     if data_file.exists() {
@@ -747,6 +761,7 @@ fn source_filter_includes(filter: SourceFilter, source: Source) -> bool {
         (SourceFilter::All, _)
             | (SourceFilter::Claude, Source::Claude)
             | (SourceFilter::Codex, Source::Codex)
+            | (SourceFilter::OpenCode, Source::OpenCode)
     )
 }
 
@@ -831,7 +846,7 @@ fn prompt_language(current: Language) -> Result<Language> {
 fn prompt_source(language: Language, current: SourcePreference) -> Result<SourcePreference> {
     loop {
         let prompt = format!(
-            "{} [all/claude/codex] ({}: {}): ",
+            "{} [all/claude/codex/opencode] ({}: {}): ",
             label_config_source(language),
             label_current(language),
             current.as_str()
@@ -946,17 +961,35 @@ fn localized_warning(language: Language, warning: &str) -> String {
     if let Some(path) = warning.strip_prefix("Codex data directory not found: ") {
         return format!("未找到 Codex 数据目录: {path}");
     }
+    if let Some(path) = warning.strip_prefix("OpenCode data directory not found: ") {
+        return format!("未找到 OpenCode 数据目录: {path}");
+    }
     if let Some(err) = warning.strip_prefix("Failed to walk Claude Code data: ") {
         return format!("遍历 Claude Code 数据失败: {err}");
     }
     if let Some(err) = warning.strip_prefix("Failed to walk Codex data: ") {
         return format!("遍历 Codex 数据失败: {err}");
     }
+    if let Some(err) = warning.strip_prefix("Failed to walk OpenCode data: ") {
+        return format!("遍历 OpenCode 数据失败: {err}");
+    }
+    if let Some(err) = warning.strip_prefix("Failed to walk OpenCode session data: ") {
+        return format!("遍历 OpenCode 会话数据失败: {err}");
+    }
     if let Some(rest) = warning.strip_prefix("Failed to read Claude Code file ") {
         return format!("读取 Claude Code 文件失败: {rest}");
     }
     if let Some(rest) = warning.strip_prefix("Failed to read Codex file ") {
         return format!("读取 Codex 文件失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read OpenCode database ") {
+        return format!("读取 OpenCode 数据库失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read OpenCode session file ") {
+        return format!("读取 OpenCode 会话文件失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read OpenCode message file ") {
+        return format!("读取 OpenCode 消息文件失败: {rest}");
     }
     if let Some(rest) = warning.strip_prefix("Invalid JSON in ") {
         return format!("无效 JSON: {rest}");
@@ -1109,6 +1142,10 @@ fn label_codex_data_dir(language: Language) -> &'static str {
     text(language, "Codex data directory", "Codex 数据目录")
 }
 
+fn label_opencode_data_dir(language: Language) -> &'static str {
+    text(language, "OpenCode data directory", "OpenCode 数据目录")
+}
+
 fn label_snapshot_file(language: Language) -> &'static str {
     text(language, "Snapshot file", "快照文件")
 }
@@ -1152,8 +1189,8 @@ fn label_invalid_language(language: Language) -> &'static str {
 fn label_invalid_source(language: Language) -> &'static str {
     text(
         language,
-        "Invalid source. Use all, claude, or codex.",
-        "无效数据来源。请输入 all、claude 或 codex。",
+        "Invalid source. Use all, claude, codex, or opencode.",
+        "无效数据来源。请输入 all、claude、codex 或 opencode。",
     )
 }
 
@@ -1345,6 +1382,9 @@ fn collect_data(filter: SourceFilter, roots: &Roots) -> Result<ReportData> {
     if matches!(filter, SourceFilter::All | SourceFilter::Codex) {
         data.merge(codex::collect(&roots.codex_sessions())?);
     }
+    if matches!(filter, SourceFilter::All | SourceFilter::OpenCode) {
+        data.merge(opencode::collect(&roots.opencode_root())?);
+    }
     Ok(data)
 }
 
@@ -1469,6 +1509,7 @@ fn source_matches(source: Source, filter: SourceFilter) -> bool {
         (_, SourceFilter::All)
             | (Source::Claude, SourceFilter::Claude)
             | (Source::Codex, SourceFilter::Codex)
+            | (Source::OpenCode, SourceFilter::OpenCode)
     )
 }
 
@@ -1497,7 +1538,7 @@ impl From<&ReportData> for DataCounts {
 
 fn print_summary(data: &ReportData, language: Language, pricing: &billing::Pricing) {
     let mut rows = Vec::new();
-    let sources = [Source::Claude, Source::Codex];
+    let sources = [Source::Claude, Source::Codex, Source::OpenCode];
     for source in sources {
         let session_count = unique_sessions(data, Some(source));
         let usage_events = data
@@ -2407,10 +2448,23 @@ mod tests {
     fn source_filters_match_expected_doctor_inputs() {
         assert!(source_filter_includes(SourceFilter::All, Source::Claude));
         assert!(source_filter_includes(SourceFilter::All, Source::Codex));
+        assert!(source_filter_includes(SourceFilter::All, Source::OpenCode));
         assert!(source_filter_includes(SourceFilter::Claude, Source::Claude));
         assert!(!source_filter_includes(SourceFilter::Claude, Source::Codex));
+        assert!(!source_filter_includes(
+            SourceFilter::Claude,
+            Source::OpenCode
+        ));
         assert!(source_filter_includes(SourceFilter::Codex, Source::Codex));
         assert!(!source_filter_includes(SourceFilter::Codex, Source::Claude));
+        assert!(source_filter_includes(
+            SourceFilter::OpenCode,
+            Source::OpenCode
+        ));
+        assert!(!source_filter_includes(
+            SourceFilter::OpenCode,
+            Source::Codex
+        ));
     }
 
     #[test]
