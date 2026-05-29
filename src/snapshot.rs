@@ -1,6 +1,6 @@
 use crate::model::{ReportData, SessionMeta, Source, ToolEvent, UsageEvent};
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -104,6 +104,8 @@ fn merge_usage_events(
     incoming: Vec<UsageEvent>,
     summary: &mut MergeSummary,
 ) {
+    drop_legacy_codex_usage_events_replaced_by_split_events(existing, &incoming);
+
     let mut events = existing
         .usage_events
         .drain(..)
@@ -124,6 +126,35 @@ fn merge_usage_events(
         }
     }
     existing.usage_events = events.into_values().collect();
+}
+
+fn drop_legacy_codex_usage_events_replaced_by_split_events(
+    existing: &mut ReportData,
+    incoming: &[UsageEvent],
+) {
+    let split_sessions = incoming
+        .iter()
+        .filter(|event| is_split_codex_usage_event(event))
+        .map(|event| event.session_id.clone())
+        .collect::<BTreeSet<_>>();
+    if split_sessions.is_empty() {
+        return;
+    }
+
+    existing.usage_events.retain(|event| {
+        !(is_legacy_codex_usage_event(event) && split_sessions.contains(&event.session_id))
+    });
+}
+
+fn is_split_codex_usage_event(event: &UsageEvent) -> bool {
+    event.source == Source::Codex
+        && event
+            .event_id
+            .starts_with(&format!("{}:token_count:", event.session_id))
+}
+
+fn is_legacy_codex_usage_event(event: &UsageEvent) -> bool {
+    event.source == Source::Codex && event.event_id == event.session_id
 }
 
 fn merge_tool_events(
@@ -240,6 +271,28 @@ mod tests {
 
         assert_eq!(summary.usage_events_added, 1);
         assert_eq!(existing.usage_events.len(), 2);
+    }
+
+    #[test]
+    fn replaces_legacy_codex_session_usage_with_split_token_count_events() {
+        let mut legacy = usage_event("session", 100);
+        legacy.session_id = String::from("session");
+        let mut split = usage_event("session:token_count:3", 40);
+        split.session_id = String::from("session");
+        let mut existing = ReportData {
+            usage_events: vec![legacy],
+            ..ReportData::default()
+        };
+        let incoming = ReportData {
+            usage_events: vec![split],
+            ..ReportData::default()
+        };
+
+        let summary = merge_preserving_growth(&mut existing, incoming);
+
+        assert_eq!(summary.usage_events_added, 1);
+        assert_eq!(existing.usage_events.len(), 1);
+        assert_eq!(existing.usage_events[0].event_id, "session:token_count:3");
     }
 
     fn usage_event(event_id: &str, total: u64) -> UsageEvent {

@@ -1,6 +1,6 @@
 [package]
 name = "ethan-tkc"
-version = "0.11.1"
+version = "0.11.2"
 edition = "2021"
 description = "Local Claude Code and Codex usage statistics CLI"
 license = "MIT"
@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

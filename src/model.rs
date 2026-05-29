@@ -48,7 +48,11 @@ impl Usage {
         if self.total > 0 {
             self.total
         } else {
-            self.input + self.cached_input + self.cache_creation_input + self.output
+            self.input
+                + self.cached_input
+                + self.cache_creation_input
+                + self.output
+                + self.reasoning_output
         }
     }
 }
@@ -155,6 +159,6 @@ mod tests {
             total: 0,
         };
 
-        assert_eq!(usage.computed_total(), 100);
+        assert_eq!(usage.computed_total(), 150);
     }
 }

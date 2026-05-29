@@ -175,7 +175,7 @@ fn validate_price(model: &str, field: &str, value: f64) -> Result<f64> {
 }
 
 fn event_cost_with_pricing(event: &UsageEvent, price_rule: Option<PriceRule>) -> Cost {
-    let accounting = usage_accounting(event.source);
+    let accounting = usage_accounting(event);
     let Some(price_rule) = price_rule else {
         if event.usage.computed_total() == 0 {
             return Cost::default();
@@ -230,11 +230,12 @@ impl TokenPrices {
             UsageAccounting::CachedInputSubset => usage.input.saturating_sub(usage.cached_input),
             UsageAccounting::CachedInputSeparate => usage.input,
         };
+        let output_tokens = usage.output + usage.reasoning_output;
         cost_component(input_tokens, self.input)
             + cost_component(usage.cached_input, self.cached_input)
             + cost_component(usage.cache_creation_input_5m, self.cache_creation_5m)
             + cost_component(usage.cache_creation_input_1h, self.cache_creation_1h)
-            + cost_component(usage.output, self.output)
+            + cost_component(output_tokens, self.output)
     }
 }
 
@@ -268,11 +269,16 @@ impl PriceRule {
     }
 }
 
-fn usage_accounting(source: Source) -> UsageAccounting {
-    match source {
+fn usage_accounting(event: &UsageEvent) -> UsageAccounting {
+    match event.source {
         Source::Claude => UsageAccounting::CachedInputSeparate,
-        Source::Codex => UsageAccounting::CachedInputSubset,
+        Source::Codex if is_legacy_codex_usage_event(event) => UsageAccounting::CachedInputSubset,
+        Source::Codex => UsageAccounting::CachedInputSeparate,
     }
+}
+
+fn is_legacy_codex_usage_event(event: &UsageEvent) -> bool {
+    event.event_id == event.session_id
 }
 
 fn prompt_tokens_for_tier(usage: &Usage, accounting: UsageAccounting) -> u64 {
@@ -570,8 +576,7 @@ mod tests {
 
     #[test]
     fn prices_openai_cached_input_as_input_subset() {
-        let cost = event_cost(&event(
-            Source::Codex,
+        let cost = event_cost(&legacy_codex_event(
             "openai/gpt-5.4",
             Usage {
                 input: 1_000_000,
@@ -583,6 +588,23 @@ mod tests {
         ));
 
         assert_eq!(format!("{:.2}", cost.usd), "4.60");
+        assert_eq!(cost.unpriced_events, 0);
+    }
+
+    #[test]
+    fn prices_reasoning_output_as_output_tokens() {
+        let cost = event_cost(&event(
+            Source::Codex,
+            "gpt-5.5",
+            Usage {
+                output: 100_000,
+                reasoning_output: 50_000,
+                total: 150_000,
+                ..Usage::default()
+            },
+        ));
+
+        assert_eq!(format!("{:.2}", cost.usd), "4.50");
         assert_eq!(cost.unpriced_events, 0);
     }
 
@@ -648,7 +670,7 @@ mod tests {
             },
         ));
 
-        assert_eq!(format!("{:.2}", codex_cost.usd), "1.97");
+        assert_eq!(format!("{:.2}", codex_cost.usd), "2.01");
         assert_eq!(format!("{:.2}", claude_cost.usd), "2.01");
     }
 
@@ -746,7 +768,7 @@ mod tests {
             },
         ));
 
-        assert_eq!(format!("{:.3}", gemini_cost.usd), "2.746");
+        assert_eq!(format!("{:.3}", gemini_cost.usd), "2.806");
         assert_eq!(format!("{:.2}", kimi_cost.usd), "5.11");
         assert_eq!(format!("{:.2}", moonshot_cost.usd), "5.00");
     }
@@ -832,7 +854,7 @@ mod tests {
         ));
 
         assert_eq!(pricing.custom_model_count(), 1);
-        assert_eq!(format!("{:.2}", cost.usd), "27.75");
+        assert_eq!(format!("{:.2}", cost.usd), "30.25");
         assert_eq!(cost.unpriced_events, 0);
     }
 
@@ -897,5 +919,11 @@ mod tests {
             model: model.to_string(),
             usage,
         }
+    }
+
+    fn legacy_codex_event(model: &str, usage: Usage) -> UsageEvent {
+        let mut event = event(Source::Codex, model, usage);
+        event.event_id = event.session_id.clone();
+        event
     }
 }
