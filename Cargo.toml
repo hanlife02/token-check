@@ -1,6 +1,6 @@
 [package]
 name = "ethan-tkc"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "Local Claude Code, Codex, and OpenCode usage statistics CLI"
 license = "MIT"

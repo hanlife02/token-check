@@ -561,11 +561,26 @@ fn write_obsidian_dashboard(snapshot_file: &Path, dashboard_file: &Path) -> Resu
 }
 
 fn obsidian_dashboard_markdown(snapshot_file: &Path, dashboard_file: &Path) -> String {
+    let home_path = env::var_os("HOME").map(PathBuf::from);
+    obsidian_dashboard_markdown_with_home(snapshot_file, dashboard_file, home_path.as_deref())
+}
+
+fn obsidian_dashboard_markdown_with_home(
+    snapshot_file: &Path,
+    dashboard_file: &Path,
+    home_path: Option<&Path>,
+) -> String {
     let snapshot_path = obsidian_dataview_snapshot_path(snapshot_file, dashboard_file);
-    OBSIDIAN_DASHBOARD_TEMPLATE.replace(
-        "__TOKENCHECK_SNAPSHOT_PATH__",
-        &escape_javascript_string(&snapshot_path),
-    )
+    let home_path = home_path.map(path_to_slash_string).unwrap_or_default();
+    OBSIDIAN_DASHBOARD_TEMPLATE
+        .replace(
+            "__TOKENCHECK_SNAPSHOT_PATH__",
+            &escape_javascript_string(&snapshot_path),
+        )
+        .replace(
+            "__TOKENCHECK_HOME_PATH__",
+            &escape_javascript_string(&home_path),
+        )
 }
 
 fn obsidian_dataview_snapshot_path(snapshot_file: &Path, dashboard_file: &Path) -> String {
@@ -2312,7 +2327,10 @@ fn format_number(value: u64) -> String {
     if value < 999_500 {
         return format_scaled_number(value, 1_000, "k");
     }
-    format_scaled_number(value, 1_000_000, "M")
+    if value < 999_500_000 {
+        return format_scaled_number(value, 1_000_000, "M");
+    }
+    format_scaled_number(value, 1_000_000_000, "B")
 }
 
 fn format_scaled_number(value: u64, divisor: u64, suffix: &str) -> String {
@@ -2366,8 +2384,9 @@ mod tests {
     use super::{
         apply_date_filter, describe_counts, fit_histogram_label, format_cost, format_dollars,
         format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
-        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dataview_snapshot_path,
-        source_filter_includes, CivilDate, DataCounts, DateFilter, SourceFilter,
+        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dashboard_markdown_with_home,
+        obsidian_dataview_snapshot_path, source_filter_includes, CivilDate, DataCounts, DateFilter,
+        SourceFilter,
     };
     use crate::billing::Cost;
     use crate::config::Language;
@@ -2383,7 +2402,10 @@ mod tests {
         assert_eq!(format_number(292_631), "293k");
         assert_eq!(format_number(999_500), "1M");
         assert_eq!(format_number(12_697_984), "12.7M");
-        assert_eq!(format_number(1_550_406_823), "1550M");
+        assert_eq!(format_number(999_499_999), "999M");
+        assert_eq!(format_number(999_500_000), "1B");
+        assert_eq!(format_number(1_550_406_823), "1.6B");
+        assert_eq!(format_number(2_485_000_000), "2.5B");
     }
 
     #[test]
@@ -2495,6 +2517,18 @@ mod tests {
 
         assert!(markdown.contains("source: data/tokencheck.json"));
         assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
+        assert!(!markdown.contains("__TOKENCHECK_HOME_PATH__"));
+    }
+
+    #[test]
+    fn injects_home_path_for_obsidian_display_helpers() {
+        let markdown = obsidian_dashboard_markdown_with_home(
+            Path::new("/Users/hanlife02/vault/data/tokencheck.json"),
+            Path::new("/Users/hanlife02/vault/Token Usage Dashboard.md"),
+            Some(Path::new("/Users/hanlife02")),
+        );
+
+        assert!(markdown.contains(r#"const configuredHomePath = "/Users/hanlife02";"#));
     }
 
     #[test]
