@@ -310,7 +310,7 @@ tkc obsidian \
   --dashboard-file "/Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md"
 ```
 
-生成的 Markdown 会读取 vault 内的 `data/tokencheck.json`，并展示 Summary、Recent Days、Top Models、Top Projects 和 Top Tools。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
+生成的 Dashboard 主文件是轻量索引页，并会在同目录生成 Summary、Recent Days、Top Models、Top Projects 和 Top Tools 分块页面。每个分块页面使用 DataviewJS 读取 vault 内的 `data/tokencheck.json`，打开对应页面时才渲染对应报表。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
 
 JSON 通常作为数据源使用，不需要直接在 Obsidian 中阅读。如果想让 Obsidian 文件列表显示 JSON，可以启用 `Files and links -> Detect all file extensions`。
 

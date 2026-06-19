@@ -170,13 +170,13 @@ Refresh the snapshot first, then update the dashboard:
 tkc obsidian --fetch
 ```
 
-The generated Markdown uses DataviewJS and reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`.
+The generated dashboard file is a lightweight index. `tkc obsidian` also writes adjacent section notes for Summary, Recent Days, Top Models, Top Projects, and Top Tools. Each section note uses DataviewJS and reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`.
 
 Obsidian requirements:
 
 - Install and enable the Dataview community plugin.
 - Enable Dataview JavaScript queries.
-- Open the configured dashboard Markdown file.
+- Open the configured dashboard Markdown file, then follow a section link.
 
 ## Troubleshooting
 

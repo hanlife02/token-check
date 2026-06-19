@@ -32,6 +32,56 @@ const HISTOGRAM_HEIGHT: usize = 10;
 const HEATMAP_LABEL_WIDTH: usize = 8;
 const HEATMAP_WEEK_WIDTH: usize = 3;
 const OBSIDIAN_DASHBOARD_TEMPLATE: &str = include_str!("../assets/obsidian-dashboard.md");
+const OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE: &str =
+    include_str!("../assets/obsidian-dashboard-summary.md");
+const OBSIDIAN_DASHBOARD_RECENT_DAYS_TEMPLATE: &str =
+    include_str!("../assets/obsidian-dashboard-recent-days.md");
+const OBSIDIAN_DASHBOARD_TOP_MODELS_TEMPLATE: &str =
+    include_str!("../assets/obsidian-dashboard-top-models.md");
+const OBSIDIAN_DASHBOARD_TOP_PROJECTS_TEMPLATE: &str =
+    include_str!("../assets/obsidian-dashboard-top-projects.md");
+const OBSIDIAN_DASHBOARD_TOP_TOOLS_TEMPLATE: &str =
+    include_str!("../assets/obsidian-dashboard-top-tools.md");
+
+struct ObsidianDashboardSectionTemplate {
+    title: &'static str,
+    suffix: &'static str,
+    template: &'static str,
+}
+
+const OBSIDIAN_DASHBOARD_SECTION_TEMPLATES: &[ObsidianDashboardSectionTemplate] = &[
+    ObsidianDashboardSectionTemplate {
+        title: "Summary",
+        suffix: "Summary",
+        template: OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
+    },
+    ObsidianDashboardSectionTemplate {
+        title: "Recent Days",
+        suffix: "Recent Days",
+        template: OBSIDIAN_DASHBOARD_RECENT_DAYS_TEMPLATE,
+    },
+    ObsidianDashboardSectionTemplate {
+        title: "Top Models",
+        suffix: "Top Models",
+        template: OBSIDIAN_DASHBOARD_TOP_MODELS_TEMPLATE,
+    },
+    ObsidianDashboardSectionTemplate {
+        title: "Top Projects",
+        suffix: "Top Projects",
+        template: OBSIDIAN_DASHBOARD_TOP_PROJECTS_TEMPLATE,
+    },
+    ObsidianDashboardSectionTemplate {
+        title: "Top Tools",
+        suffix: "Top Tools",
+        template: OBSIDIAN_DASHBOARD_TOP_TOOLS_TEMPLATE,
+    },
+];
+
+struct ObsidianDashboardSectionFile {
+    title: &'static str,
+    path: PathBuf,
+    template: &'static str,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
@@ -555,9 +605,24 @@ fn write_obsidian_dashboard(snapshot_file: &Path, dashboard_file: &Path) -> Resu
     if let Some(parent) = dashboard_file.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    let home_path = env::var_os("HOME").map(PathBuf::from);
     let content = obsidian_dashboard_markdown(snapshot_file, dashboard_file);
     fs::write(dashboard_file, content)
-        .with_context(|| format!("write {}", dashboard_file.display()))
+        .with_context(|| format!("write {}", dashboard_file.display()))?;
+
+    for section in obsidian_dashboard_section_files(dashboard_file) {
+        let content = obsidian_dashboard_section_markdown_with_home(
+            snapshot_file,
+            dashboard_file,
+            &section.path,
+            section.template,
+            home_path.as_deref(),
+        );
+        fs::write(&section.path, content)
+            .with_context(|| format!("write {}", section.path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn obsidian_dashboard_markdown(snapshot_file: &Path, dashboard_file: &Path) -> String {
@@ -570,9 +635,41 @@ fn obsidian_dashboard_markdown_with_home(
     dashboard_file: &Path,
     home_path: Option<&Path>,
 ) -> String {
-    let snapshot_path = obsidian_dataview_snapshot_path(snapshot_file, dashboard_file);
+    replace_obsidian_template_placeholders(
+        OBSIDIAN_DASHBOARD_TEMPLATE,
+        snapshot_file,
+        dashboard_file,
+        home_path,
+    )
+    .replace(
+        "__TOKENCHECK_SECTION_LINKS__",
+        &obsidian_dashboard_section_links(dashboard_file),
+    )
+}
+
+fn obsidian_dashboard_section_markdown_with_home(
+    snapshot_file: &Path,
+    dashboard_file: &Path,
+    section_file: &Path,
+    template: &str,
+    home_path: Option<&Path>,
+) -> String {
+    replace_obsidian_template_placeholders(template, snapshot_file, section_file, home_path)
+        .replace(
+            "__TOKENCHECK_DASHBOARD_LINK__",
+            &obsidian_markdown_file_link(dashboard_file, "Dashboard"),
+        )
+}
+
+fn replace_obsidian_template_placeholders(
+    template: &str,
+    snapshot_file: &Path,
+    note_file: &Path,
+    home_path: Option<&Path>,
+) -> String {
+    let snapshot_path = obsidian_dataview_snapshot_path(snapshot_file, note_file);
     let home_path = home_path.map(path_to_slash_string).unwrap_or_default();
-    OBSIDIAN_DASHBOARD_TEMPLATE
+    template
         .replace(
             "__TOKENCHECK_SNAPSHOT_PATH__",
             &escape_javascript_string(&snapshot_path),
@@ -581,6 +678,63 @@ fn obsidian_dashboard_markdown_with_home(
             "__TOKENCHECK_HOME_PATH__",
             &escape_javascript_string(&home_path),
         )
+}
+
+fn obsidian_dashboard_section_files(dashboard_file: &Path) -> Vec<ObsidianDashboardSectionFile> {
+    let stem = dashboard_file
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Token Usage Dashboard".to_string());
+    let extension = dashboard_file
+        .extension()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty());
+
+    OBSIDIAN_DASHBOARD_SECTION_TEMPLATES
+        .iter()
+        .map(|section| {
+            let file_name = match &extension {
+                Some(extension) => format!("{stem} - {}.{extension}", section.suffix),
+                None => format!("{stem} - {}", section.suffix),
+            };
+
+            ObsidianDashboardSectionFile {
+                title: section.title,
+                path: dashboard_file.with_file_name(file_name),
+                template: section.template,
+            }
+        })
+        .collect()
+}
+
+fn obsidian_dashboard_section_links(dashboard_file: &Path) -> String {
+    obsidian_dashboard_section_files(dashboard_file)
+        .iter()
+        .map(|section| {
+            format!(
+                "- {}",
+                obsidian_markdown_file_link(&section.path, section.title)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn obsidian_markdown_file_link(file: &Path, label: &str) -> String {
+    let destination = file
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path_to_slash_string(file));
+    format!(
+        "[{}](<{}>)",
+        label,
+        escape_markdown_link_destination(&destination)
+    )
+}
+
+fn escape_markdown_link_destination(value: &str) -> String {
+    value.replace('\\', "/").replace('>', "%3E")
 }
 
 fn obsidian_dataview_snapshot_path(snapshot_file: &Path, dashboard_file: &Path) -> String {
@@ -2384,9 +2538,10 @@ mod tests {
     use super::{
         apply_date_filter, describe_counts, fit_histogram_label, format_cost, format_dollars,
         format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
-        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dashboard_markdown_with_home,
-        obsidian_dataview_snapshot_path, source_filter_includes, CivilDate, DataCounts, DateFilter,
-        SourceFilter,
+        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dashboard_section_files,
+        obsidian_dashboard_section_markdown_with_home, obsidian_dataview_snapshot_path,
+        source_filter_includes, CivilDate, DataCounts, DateFilter, SourceFilter,
+        OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
     };
     use crate::billing::Cost;
     use crate::config::Language;
@@ -2516,19 +2671,24 @@ mod tests {
         );
 
         assert!(markdown.contains("source: data/tokencheck.json"));
-        assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
+        assert!(markdown.contains("[Summary](<Token Usage Dashboard - Summary.md>)"));
+        assert!(markdown.contains("[Recent Days](<Token Usage Dashboard - Recent Days.md>)"));
         assert!(!markdown.contains("__TOKENCHECK_HOME_PATH__"));
     }
 
     #[test]
     fn injects_home_path_for_obsidian_display_helpers() {
-        let markdown = obsidian_dashboard_markdown_with_home(
-            Path::new("/Users/hanlife02/vault/data/tokencheck.json"),
+        let markdown = obsidian_dashboard_section_markdown_with_home(
+            Path::new("data/tokencheck.json"),
             Path::new("/Users/hanlife02/vault/Token Usage Dashboard.md"),
+            Path::new("/Users/hanlife02/vault/Token Usage Dashboard - Summary.md"),
+            OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
             Some(Path::new("/Users/hanlife02")),
         );
 
         assert!(markdown.contains(r#"const configuredHomePath = "/Users/hanlife02";"#));
+        assert!(markdown.contains(r#"[Dashboard](<Token Usage Dashboard.md>)"#));
+        assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
     }
 
     #[test]
@@ -2539,6 +2699,23 @@ mod tests {
                 Path::new("2 - Docs/token-check/Token Usage Dashboard.md"),
             ),
             "data/tokencheck.json"
+        );
+    }
+
+    #[test]
+    fn builds_obsidian_dashboard_section_files_next_to_dashboard() {
+        let sections =
+            obsidian_dashboard_section_files(Path::new("2 - Docs/token-check/Token Usage.md"));
+
+        assert_eq!(sections.len(), 5);
+        assert_eq!(sections[0].title, "Summary");
+        assert_eq!(
+            sections[0].path,
+            Path::new("2 - Docs/token-check/Token Usage - Summary.md")
+        );
+        assert_eq!(
+            sections[4].path,
+            Path::new("2 - Docs/token-check/Token Usage - Top Tools.md")
         );
     }
 
