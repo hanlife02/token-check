@@ -2671,6 +2671,7 @@ mod tests {
         );
 
         assert!(markdown.contains("source: data/tokencheck.json"));
+        assert!(markdown.contains("tags:\n  - token-check\n  - hanlife02"));
         assert!(markdown.contains("[Summary](<Token Usage Dashboard - Summary.md>)"));
         assert!(markdown.contains("[Recent Days](<Token Usage Dashboard - Recent Days.md>)"));
         assert!(!markdown.contains("__TOKENCHECK_HOME_PATH__"));
@@ -2689,6 +2690,7 @@ mod tests {
         assert!(markdown.contains(r#"const configuredHomePath = "/Users/hanlife02";"#));
         assert!(markdown.contains(r#"[Dashboard](<Token Usage Dashboard.md>)"#));
         assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
+        assert!(markdown.contains("tags:\n  - token-check\n  - hanlife02"));
     }
 
     #[test]

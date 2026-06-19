@@ -2,6 +2,9 @@
 type: dashboard-section
 source: __TOKENCHECK_SNAPSHOT_PATH__
 section: summary
+tags:
+  - token-check
+  - hanlife02
 ---
 
 # Summary

@@ -2,6 +2,9 @@
 type: dashboard-section
 source: __TOKENCHECK_SNAPSHOT_PATH__
 section: top-tools
+tags:
+  - token-check
+  - hanlife02
 ---
 
 # Top Tools
