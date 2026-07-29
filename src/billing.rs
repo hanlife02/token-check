@@ -275,6 +275,7 @@ fn usage_accounting(event: &UsageEvent) -> UsageAccounting {
         Source::Codex if is_legacy_codex_usage_event(event) => UsageAccounting::CachedInputSubset,
         Source::Codex => UsageAccounting::CachedInputSeparate,
         Source::OpenCode => UsageAccounting::CachedInputSeparate,
+        Source::Pi => UsageAccounting::CachedInputSeparate,
     }
 }
 

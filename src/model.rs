@@ -8,6 +8,7 @@ pub enum Source {
     Claude,
     Codex,
     OpenCode,
+    Pi,
 }
 
 impl Source {
@@ -16,6 +17,7 @@ impl Source {
             Source::Claude => "claude",
             Source::Codex => "codex",
             Source::OpenCode => "opencode",
+            Source::Pi => "pi",
         }
     }
 }
@@ -128,13 +130,46 @@ impl Roots {
     pub fn opencode_root(&self) -> PathBuf {
         self.home.join(".local").join("share").join("opencode")
     }
+
+    pub fn pi_sessions(&self) -> PathBuf {
+        self.home.join(".pi").join("agent").join("sessions")
+    }
 }
 
 pub type UsageMap<K> = BTreeMap<K, Usage>;
 
 #[cfg(test)]
 mod tests {
-    use super::Usage;
+    use super::{Roots, Source, Usage};
+    use std::path::PathBuf;
+
+    #[test]
+    fn labels_pi_source_for_reports_and_snapshots() {
+        // Given
+        let source = Source::Pi;
+
+        // When
+        let label = source.label();
+        let serialized = serde_json::to_string(&source).unwrap();
+
+        // Then
+        assert_eq!(label, "pi");
+        assert_eq!(serialized, r#""pi""#);
+    }
+
+    #[test]
+    fn resolves_pi_sessions_under_agent_data_directory() {
+        // Given
+        let roots = Roots {
+            home: PathBuf::from("/tmp/user"),
+        };
+
+        // When
+        let sessions = roots.pi_sessions();
+
+        // Then
+        assert_eq!(sessions, PathBuf::from("/tmp/user/.pi/agent/sessions"));
+    }
 
     #[test]
     fn uses_explicit_total_when_present() {

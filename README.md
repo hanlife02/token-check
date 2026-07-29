@@ -1,10 +1,10 @@
 # tokencheck
 
-`tokencheck` 是一个本地优先的 Rust 命令行工具，用来统计本机 Claude Code、Codex 和 OpenCode 的 token 使用情况、工具调用、项目分布、模型分布和估算成本。
+`tokencheck` 是一个本地优先的 Rust 命令行工具，用来统计本机 Claude Code、Codex、OpenCode 和 Pi 的 token 使用情况、工具调用、项目分布、模型分布和估算成本。
 
 - crates.io 包名：`ethan-tkc`
 - 安装后命令：`tkc`、`tokencheck`
-- 当前版本：`0.12.0`
+- 当前版本：`1.0.0`
 - License：MIT
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
@@ -28,14 +28,14 @@
 
 ## 功能概览
 
-- 统计 Claude Code、Codex 和 OpenCode 的总 token 使用量。
+- 统计 Claude Code、Codex、OpenCode 和 Pi 的总 token 使用量。
 - 按日期、项目、模型和工具名聚合使用情况。
 - 用 `tkc days --chant` 输出 Tokscale 风格终端柱状图。
 - 用 `tkc heatmap` 输出终端周历热力图。
 - 按模型价格估算每日、项目、模型和总美元成本。
 - 支持自定义模型价格文件，覆盖或补充内置价格。
 - 支持 JSON 快照，避免本机日志清理后丢失历史统计。
-- 支持 `all`、`claude`、`codex`、`opencode` 四种数据来源过滤。
+- 支持 `all`、`claude`、`codex`、`opencode`、`pi` 五种数据来源过滤。
 - 支持 `--since`、`--until` 按日期过滤报表。
 - 支持 `tkc config` 交互式配置默认行为。
 - 支持 `tkc doctor` 诊断配置、快照和本机数据目录。
@@ -181,7 +181,7 @@ $XDG_CONFIG_HOME/tokencheck/config.json
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `language` | `en` | 输出语言。支持 `en` 和 `zh`。 |
-| `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`、`opencode`。 |
+| `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`、`opencode`、`pi`。 |
 | `data_file` | `data/tokencheck.json` | 默认快照文件路径，也就是 `fetch` 保存和 `--from-json` 读取的位置。 |
 | `pricing_file` | 无 | 自定义价格 JSON 文件路径。输入 `none`、`null` 或 `-` 可以清空。 |
 | `obsidian_snapshot_file` | 无 | Obsidian 使用的 JSON 快照路径。`tkc obsidian --fetch` 会写入这个文件；未配置时回退到 `data_file`。 |
@@ -197,7 +197,7 @@ Config file: /Users/you/.config/tokencheck/config.json
 Press Enter on a blank input to keep and save the shown value.
 
 Language [en/zh] (current: en):
-Default source [all/claude/codex/opencode] (current: all):
+Default source [all/claude/codex/opencode/pi] (current: all):
 Snapshot data file (current: data/tokencheck.json): ~/.tokencheck/usage.json
 Custom pricing file [path/none] (current: none): ~/.tokencheck/pricing.json
 Obsidian snapshot file [path/none] (current: none): /Users/you/Vault/data/tokencheck.json
@@ -310,7 +310,9 @@ tkc obsidian \
   --dashboard-file "/Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md"
 ```
 
-生成的 Dashboard 主文件是轻量索引页，并会在同目录生成 Summary、Recent Days、Top Models、Top Projects 和 Top Tools 分块页面。每个分块页面使用 DataviewJS 读取 vault 内的 `data/tokencheck.json`，打开对应页面时才渲染对应报表。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
+生成结果是单个 Dashboard Markdown 文件，按顺序包含 Summary、Recent Days、Top Models、Top Projects 和 Top Tools 五个 DataviewJS 区块。Recent Days 显示最近 365 天的用量热力图；三个 Top 区块分别显示前 10 个模型、项目和工具。Dashboard 会适配 Obsidian 明暗主题，年度热力图在窄窗口中可横向滚动。
+
+每次运行 `tkc obsidian` 都会覆盖配置指定的 Dashboard 文件，但不会删除旧版本生成的相邻分块文件，避免移除用户可能手动修改过的笔记。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
 
 JSON 通常作为数据源使用，不需要直接在 Obsidian 中阅读。如果想让 Obsidian 文件列表显示 JSON，可以启用 `Files and links -> Detect all file extensions`。
 
@@ -346,7 +348,7 @@ tkc summary --source codex
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--source all\|claude\|codex\|opencode` | 配置值，初始为 `all` | 选择数据来源。`all` 同时统计 Claude Code、Codex 和 OpenCode。 |
+| `--source all\|claude\|codex\|opencode\|pi` | 配置值，初始为 `all` | 选择数据来源。`all` 同时统计 Claude Code、Codex、OpenCode 和 Pi。 |
 | `--home <PATH>` | 当前 `$HOME` | 指定要扫描的 home 目录。适合测试、读取备份目录或统计另一份用户数据。 |
 | `--limit <N>` | 配置值，初始为 `20` | 控制排行或日期输出数量。主要影响 `days`、`projects`、`models`、`tools`。 |
 | `--from-json` | 关闭 | 只读取 JSON 快照，不扫描实时本机日志。对 `fetch` 无效。 |
@@ -386,7 +388,7 @@ tkc summary
 - 涉及多少项目和模型？
 - 总 token 是多少？
 - 估算成本是多少？
-- Claude Code、Codex 和 OpenCode 分别贡献了多少输入、缓存、输出和工具调用？
+- Claude Code、Codex、OpenCode 和 Pi 分别贡献了多少输入、缓存、输出和工具调用？
 
 示例：
 
@@ -395,6 +397,7 @@ tkc summary
 tkc summary --source claude
 tkc summary --source codex
 tkc summary --source opencode
+tkc summary --source pi
 tkc summary --from-json
 tkc summary --since 30d
 ```
@@ -414,7 +417,7 @@ tkc summary --since 30d
 
 ### `tkc fetch`
 
-`fetch` 扫描本机 Claude Code、Codex 和 OpenCode 数据，并把结果合并保存到 JSON 快照。默认写入：
+`fetch` 扫描本机 Claude Code、Codex、OpenCode 和 Pi 数据，并把结果合并保存到 JSON 快照。默认写入：
 
 ```text
 data/tokencheck.json
@@ -426,6 +429,7 @@ data/tokencheck.json
 tkc fetch
 tkc fetch --source codex
 tkc fetch --source opencode
+tkc fetch --source pi
 tkc fetch --source claude --data-file data/claude.json
 tkc fetch --home /Users/yourname --data-file data/backup.json
 ```
@@ -534,6 +538,7 @@ tkc projects --since 30d
 
 - Claude Code 的项目通常来自 `~/.claude/projects` 下的项目路径映射。
 - Codex 的项目来自 session 记录中的工作目录信息。
+- OpenCode 和 Pi 的项目来自各自 session 记录中的工作目录信息。
 - 如果原始数据缺少项目路径，会显示为 `unknown`。
 
 ### `tkc models`
@@ -568,7 +573,7 @@ tkc tools --since 2026-05-01
 
 | 字段 | 含义 |
 | --- | --- |
-| `source` | `Claude` 或 `Codex`。 |
+| `source` | `Claude`、`Codex`、`OpenCode` 或 `Pi`。 |
 | `tool` | 工具名，例如 `Read`、`Edit`、`Bash`、`apply_patch`。 |
 | `calls` | 工具调用次数。 |
 | `days` | 该工具出现过的日期数量。 |
@@ -583,6 +588,7 @@ tkc tools --since 2026-05-01
 ```bash
 tkc doctor
 tkc doctor --source codex
+tkc doctor --source pi
 tkc doctor --home /Users/yourname
 tkc doctor --data-file data/workstation.json
 tkc doctor --pricing-file ~/.tokencheck/pricing.json
@@ -594,16 +600,17 @@ tkc doctor --pricing-file ~/.tokencheck/pricing.json
 | --- | --- |
 | `Config file` | 当前配置文件路径是否存在；不存在时会使用内置默认值。 |
 | `Home directory` | 实时扫描使用的 home 目录是否存在。 |
-| `Source filter` | 当前生效的数据来源过滤：`all`、`claude`、`codex` 或 `opencode`。 |
+| `Source filter` | 当前生效的数据来源过滤：`all`、`claude`、`codex`、`opencode` 或 `pi`。 |
 | `Custom pricing file` | 自定义价格文件是否存在且能解析；未配置时使用内置价格。 |
 | `Claude Code data directory` | 是否能找到 `$HOME/.claude/projects`。 |
 | `Codex data directory` | 是否能找到 `$HOME/.codex/sessions`。 |
 | `OpenCode data directory` | 是否能找到 `$HOME/.local/share/opencode`。 |
+| `Pi data directory` | 是否能找到 `$HOME/.pi/agent/sessions`。 |
 | `Snapshot file` | 配置或命令行指定的 JSON 快照是否存在且可读取。 |
 | `Live scan` | 实时扫描当前本机日志后得到的 session、usage、tool 和 token 计数。 |
 | `Report data` | 当前配置下是否已经有可用 usage 数据。 |
 
-如果你安装后运行 `tkc` 没有数据，优先运行 `tkc doctor`。常见原因是 Claude/Codex/OpenCode 日志目录不存在、`--home` 指错目录、只配置了某一个 `source`，或者快照文件还没有通过 `tkc fetch` 创建。
+如果你安装后运行 `tkc` 没有数据，优先运行 `tkc doctor`。常见原因是 Claude Code、Codex、OpenCode 或 Pi 日志目录不存在、`--home` 指错目录、只配置了某一个 `source`，或者快照文件还没有通过 `tkc fetch` 创建。
 
 ## 数据与快照
 
@@ -612,13 +619,13 @@ tkc doctor --pricing-file ~/.tokencheck/pricing.json
 报表命令默认会做三件事：
 
 1. 读取 `tkc config` 保存的配置；如果没有配置文件，则使用内置默认值。
-2. 扫描当前用户 `$HOME` 下的 Claude Code、Codex 和 OpenCode 本地数据。
+2. 扫描当前用户 `$HOME` 下的 Claude Code、Codex、OpenCode 和 Pi 本地数据。
 3. 如果配置的快照文件存在，默认是 `data/tokencheck.json`，把快照数据和实时扫描结果合并后展示。
 
-这样可以保留历史统计：即使 Claude Code、Codex 或 OpenCode 的原始日志后续被清理，只要你之前运行过 `tkc fetch`，快照中的旧数据仍然会参与报表。
+这样可以保留历史统计：即使 Claude Code、Codex、OpenCode 或 Pi 的原始日志后续被清理，只要你之前运行过 `tkc fetch`，快照中的旧数据仍然会参与报表。
 
 ```text
-Claude/Codex JSONL + OpenCode SQLite/JSON -> collector -> ReportData
+Claude/Codex/Pi JSONL + OpenCode SQLite/JSON -> collector -> ReportData
 data/tokencheck.json -> snapshot loader -> ReportData
 ReportData -> source filter -> command aggregation -> terminal output
 ```
@@ -645,6 +652,12 @@ OpenCode：
 ~/.local/share/opencode/opencode.db
 ~/.local/share/opencode/storage/message/**/*.json
 ~/.local/share/opencode/storage/session/**/*.json
+```
+
+Pi：
+
+```text
+~/.pi/agent/sessions/**/*.jsonl
 ```
 
 当前版本不默认扫描 `~/.codex/log/codex-tui.log`，因为该文件可能非常大，且包含更细的运行日志。
@@ -781,6 +794,7 @@ src/
 ├── claude_code/     # Claude Code JSONL 数据读取
 ├── codex/           # Codex sessions JSONL 数据读取
 ├── opencode/        # OpenCode SQLite 与 JSON 数据读取
+├── pi/              # Pi sessions JSONL 数据读取
 ├── lib.rs           # CLI、命令分发、聚合、终端渲染
 ├── model.rs         # 共享数据模型
 ├── snapshot.rs      # JSON 快照读写、去重、合并
@@ -852,7 +866,7 @@ CARGO_REGISTRY_TOKEN
 
 触发方式：
 
-- 推送 `v*` tag，例如 `v0.12.0`。
+- 推送 `v*` tag，例如 `v1.0.0`。
 - 手动运行 `Build GitHub release` workflow。未填写 tag 时，默认使用 `Cargo.toml` 版本生成 `v<version>`。
 
 release workflow 会先运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test`，再为以下平台构建并上传归档：

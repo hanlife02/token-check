@@ -6,6 +6,7 @@ pub mod codex;
 pub mod config;
 pub mod model;
 pub mod opencode;
+pub mod pi;
 pub mod snapshot;
 
 use crate::config::{AppConfig, Language, SourcePreference};
@@ -32,60 +33,10 @@ const HISTOGRAM_HEIGHT: usize = 10;
 const HEATMAP_LABEL_WIDTH: usize = 8;
 const HEATMAP_WEEK_WIDTH: usize = 3;
 const OBSIDIAN_DASHBOARD_TEMPLATE: &str = include_str!("../assets/obsidian-dashboard.md");
-const OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE: &str =
-    include_str!("../assets/obsidian-dashboard-summary.md");
-const OBSIDIAN_DASHBOARD_RECENT_DAYS_TEMPLATE: &str =
-    include_str!("../assets/obsidian-dashboard-recent-days.md");
-const OBSIDIAN_DASHBOARD_TOP_MODELS_TEMPLATE: &str =
-    include_str!("../assets/obsidian-dashboard-top-models.md");
-const OBSIDIAN_DASHBOARD_TOP_PROJECTS_TEMPLATE: &str =
-    include_str!("../assets/obsidian-dashboard-top-projects.md");
-const OBSIDIAN_DASHBOARD_TOP_TOOLS_TEMPLATE: &str =
-    include_str!("../assets/obsidian-dashboard-top-tools.md");
-
-struct ObsidianDashboardSectionTemplate {
-    title: &'static str,
-    suffix: &'static str,
-    template: &'static str,
-}
-
-const OBSIDIAN_DASHBOARD_SECTION_TEMPLATES: &[ObsidianDashboardSectionTemplate] = &[
-    ObsidianDashboardSectionTemplate {
-        title: "Summary",
-        suffix: "Summary",
-        template: OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
-    },
-    ObsidianDashboardSectionTemplate {
-        title: "Recent Days",
-        suffix: "Recent Days",
-        template: OBSIDIAN_DASHBOARD_RECENT_DAYS_TEMPLATE,
-    },
-    ObsidianDashboardSectionTemplate {
-        title: "Top Models",
-        suffix: "Top Models",
-        template: OBSIDIAN_DASHBOARD_TOP_MODELS_TEMPLATE,
-    },
-    ObsidianDashboardSectionTemplate {
-        title: "Top Projects",
-        suffix: "Top Projects",
-        template: OBSIDIAN_DASHBOARD_TOP_PROJECTS_TEMPLATE,
-    },
-    ObsidianDashboardSectionTemplate {
-        title: "Top Tools",
-        suffix: "Top Tools",
-        template: OBSIDIAN_DASHBOARD_TOP_TOOLS_TEMPLATE,
-    },
-];
-
-struct ObsidianDashboardSectionFile {
-    title: &'static str,
-    path: PathBuf,
-    template: &'static str,
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "tokencheck")]
-#[command(about = "Local Claude Code, Codex, and OpenCode usage stats")]
+#[command(about = "Local Claude Code, Codex, OpenCode, and Pi usage stats")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -198,6 +149,7 @@ enum SourceFilter {
     Codex,
     #[value(name = "opencode", alias = "open-code", alias = "oc")]
     OpenCode,
+    Pi,
 }
 
 impl From<SourcePreference> for SourceFilter {
@@ -207,6 +159,7 @@ impl From<SourcePreference> for SourceFilter {
             SourcePreference::Claude => SourceFilter::Claude,
             SourcePreference::Codex => SourceFilter::Codex,
             SourcePreference::OpenCode => SourceFilter::OpenCode,
+            SourcePreference::Pi => SourceFilter::Pi,
         }
     }
 }
@@ -218,6 +171,7 @@ impl From<SourceFilter> for SourcePreference {
             SourceFilter::Claude => SourcePreference::Claude,
             SourceFilter::Codex => SourcePreference::Codex,
             SourceFilter::OpenCode => SourcePreference::OpenCode,
+            SourceFilter::Pi => SourcePreference::Pi,
         }
     }
 }
@@ -229,6 +183,7 @@ impl SourceFilter {
             SourceFilter::Claude => "claude",
             SourceFilter::Codex => "codex",
             SourceFilter::OpenCode => "opencode",
+            SourceFilter::Pi => "pi",
         }
     }
 }
@@ -605,24 +560,9 @@ fn write_obsidian_dashboard(snapshot_file: &Path, dashboard_file: &Path) -> Resu
     if let Some(parent) = dashboard_file.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let home_path = env::var_os("HOME").map(PathBuf::from);
     let content = obsidian_dashboard_markdown(snapshot_file, dashboard_file);
     fs::write(dashboard_file, content)
-        .with_context(|| format!("write {}", dashboard_file.display()))?;
-
-    for section in obsidian_dashboard_section_files(dashboard_file) {
-        let content = obsidian_dashboard_section_markdown_with_home(
-            snapshot_file,
-            dashboard_file,
-            &section.path,
-            section.template,
-            home_path.as_deref(),
-        );
-        fs::write(&section.path, content)
-            .with_context(|| format!("write {}", section.path.display()))?;
-    }
-
-    Ok(())
+        .with_context(|| format!("write {}", dashboard_file.display()))
 }
 
 fn obsidian_dashboard_markdown(snapshot_file: &Path, dashboard_file: &Path) -> String {
@@ -641,24 +581,6 @@ fn obsidian_dashboard_markdown_with_home(
         dashboard_file,
         home_path,
     )
-    .replace(
-        "__TOKENCHECK_SECTION_LINKS__",
-        &obsidian_dashboard_section_links(dashboard_file),
-    )
-}
-
-fn obsidian_dashboard_section_markdown_with_home(
-    snapshot_file: &Path,
-    dashboard_file: &Path,
-    section_file: &Path,
-    template: &str,
-    home_path: Option<&Path>,
-) -> String {
-    replace_obsidian_template_placeholders(template, snapshot_file, section_file, home_path)
-        .replace(
-            "__TOKENCHECK_DASHBOARD_LINK__",
-            &obsidian_markdown_file_link(dashboard_file, "Dashboard"),
-        )
 }
 
 fn replace_obsidian_template_placeholders(
@@ -678,63 +600,6 @@ fn replace_obsidian_template_placeholders(
             "__TOKENCHECK_HOME_PATH__",
             &escape_javascript_string(&home_path),
         )
-}
-
-fn obsidian_dashboard_section_files(dashboard_file: &Path) -> Vec<ObsidianDashboardSectionFile> {
-    let stem = dashboard_file
-        .file_stem()
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Token Usage Dashboard".to_string());
-    let extension = dashboard_file
-        .extension()
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.is_empty());
-
-    OBSIDIAN_DASHBOARD_SECTION_TEMPLATES
-        .iter()
-        .map(|section| {
-            let file_name = match &extension {
-                Some(extension) => format!("{stem} - {}.{extension}", section.suffix),
-                None => format!("{stem} - {}", section.suffix),
-            };
-
-            ObsidianDashboardSectionFile {
-                title: section.title,
-                path: dashboard_file.with_file_name(file_name),
-                template: section.template,
-            }
-        })
-        .collect()
-}
-
-fn obsidian_dashboard_section_links(dashboard_file: &Path) -> String {
-    obsidian_dashboard_section_files(dashboard_file)
-        .iter()
-        .map(|section| {
-            format!(
-                "- {}",
-                obsidian_markdown_file_link(&section.path, section.title)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn obsidian_markdown_file_link(file: &Path, label: &str) -> String {
-    let destination = file
-        .file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path_to_slash_string(file));
-    format!(
-        "[{}](<{}>)",
-        label,
-        escape_markdown_link_destination(&destination)
-    )
-}
-
-fn escape_markdown_link_destination(value: &str) -> String {
-    value.replace('\\', "/").replace('>', "%3E")
 }
 
 fn obsidian_dataview_snapshot_path(snapshot_file: &Path, dashboard_file: &Path) -> String {
@@ -828,6 +693,14 @@ fn run_doctor(
         let path = roots.opencode_root();
         rows.push(doctor_row(
             label_opencode_data_dir(language),
+            path.exists(),
+            describe_path_status(&path, language),
+        ));
+    }
+    if source_filter_includes(filter, Source::Pi) {
+        let path = roots.pi_sessions();
+        rows.push(doctor_row(
+            label_pi_data_dir(language),
             path.exists(),
             describe_path_status(&path, language),
         ));
@@ -931,6 +804,7 @@ fn source_filter_includes(filter: SourceFilter, source: Source) -> bool {
             | (SourceFilter::Claude, Source::Claude)
             | (SourceFilter::Codex, Source::Codex)
             | (SourceFilter::OpenCode, Source::OpenCode)
+            | (SourceFilter::Pi, Source::Pi)
     )
 }
 
@@ -1015,7 +889,7 @@ fn prompt_language(current: Language) -> Result<Language> {
 fn prompt_source(language: Language, current: SourcePreference) -> Result<SourcePreference> {
     loop {
         let prompt = format!(
-            "{} [all/claude/codex/opencode] ({}: {}): ",
+            "{} [all/claude/codex/opencode/pi] ({}: {}): ",
             label_config_source(language),
             label_current(language),
             current.as_str()
@@ -1133,6 +1007,9 @@ fn localized_warning(language: Language, warning: &str) -> String {
     if let Some(path) = warning.strip_prefix("OpenCode data directory not found: ") {
         return format!("未找到 OpenCode 数据目录: {path}");
     }
+    if let Some(path) = warning.strip_prefix("Pi data directory not found: ") {
+        return format!("未找到 Pi 数据目录: {path}");
+    }
     if let Some(err) = warning.strip_prefix("Failed to walk Claude Code data: ") {
         return format!("遍历 Claude Code 数据失败: {err}");
     }
@@ -1141,6 +1018,9 @@ fn localized_warning(language: Language, warning: &str) -> String {
     }
     if let Some(err) = warning.strip_prefix("Failed to walk OpenCode data: ") {
         return format!("遍历 OpenCode 数据失败: {err}");
+    }
+    if let Some(err) = warning.strip_prefix("Failed to walk Pi data: ") {
+        return format!("遍历 Pi 数据失败: {err}");
     }
     if let Some(err) = warning.strip_prefix("Failed to walk OpenCode session data: ") {
         return format!("遍历 OpenCode 会话数据失败: {err}");
@@ -1159,6 +1039,9 @@ fn localized_warning(language: Language, warning: &str) -> String {
     }
     if let Some(rest) = warning.strip_prefix("Failed to read OpenCode message file ") {
         return format!("读取 OpenCode 消息文件失败: {rest}");
+    }
+    if let Some(rest) = warning.strip_prefix("Failed to read Pi file ") {
+        return format!("读取 Pi 文件失败: {rest}");
     }
     if let Some(rest) = warning.strip_prefix("Invalid JSON in ") {
         return format!("无效 JSON: {rest}");
@@ -1315,6 +1198,10 @@ fn label_opencode_data_dir(language: Language) -> &'static str {
     text(language, "OpenCode data directory", "OpenCode 数据目录")
 }
 
+fn label_pi_data_dir(language: Language) -> &'static str {
+    text(language, "Pi data directory", "Pi 数据目录")
+}
+
 fn label_snapshot_file(language: Language) -> &'static str {
     text(language, "Snapshot file", "快照文件")
 }
@@ -1358,8 +1245,8 @@ fn label_invalid_language(language: Language) -> &'static str {
 fn label_invalid_source(language: Language) -> &'static str {
     text(
         language,
-        "Invalid source. Use all, claude, codex, or opencode.",
-        "无效数据来源。请输入 all、claude、codex 或 opencode。",
+        "Invalid source. Use all, claude, codex, opencode, or pi.",
+        "无效数据来源。请输入 all、claude、codex、opencode 或 pi。",
     )
 }
 
@@ -1554,6 +1441,9 @@ fn collect_data(filter: SourceFilter, roots: &Roots) -> Result<ReportData> {
     if matches!(filter, SourceFilter::All | SourceFilter::OpenCode) {
         data.merge(opencode::collect(&roots.opencode_root())?);
     }
+    if matches!(filter, SourceFilter::All | SourceFilter::Pi) {
+        data.merge(pi::collect(&roots.pi_sessions())?);
+    }
     Ok(data)
 }
 
@@ -1679,6 +1569,7 @@ fn source_matches(source: Source, filter: SourceFilter) -> bool {
             | (Source::Claude, SourceFilter::Claude)
             | (Source::Codex, SourceFilter::Codex)
             | (Source::OpenCode, SourceFilter::OpenCode)
+            | (Source::Pi, SourceFilter::Pi)
     )
 }
 
@@ -1707,7 +1598,7 @@ impl From<&ReportData> for DataCounts {
 
 fn print_summary(data: &ReportData, language: Language, pricing: &billing::Pricing) {
     let mut rows = Vec::new();
-    let sources = [Source::Claude, Source::Codex, Source::OpenCode];
+    let sources = [Source::Claude, Source::Codex, Source::OpenCode, Source::Pi];
     for source in sources {
         let session_count = unique_sessions(data, Some(source));
         let usage_events = data
@@ -2538,15 +2429,16 @@ mod tests {
     use super::{
         apply_date_filter, describe_counts, fit_histogram_label, format_cost, format_dollars,
         format_number, heatmap_level, histogram_height, localized_warning, max_heatmap_weeks,
-        max_histogram_columns, obsidian_dashboard_markdown, obsidian_dashboard_section_files,
-        obsidian_dashboard_section_markdown_with_home, obsidian_dataview_snapshot_path,
-        source_filter_includes, CivilDate, DataCounts, DateFilter, SourceFilter,
-        OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
+        max_histogram_columns, obsidian_dashboard_markdown_with_home,
+        obsidian_dataview_snapshot_path, source_filter_includes, write_obsidian_dashboard,
+        CivilDate, DataCounts, DateFilter, SourceFilter,
     };
     use crate::billing::Cost;
     use crate::config::Language;
     use crate::model::{ReportData, SessionMeta, Source, ToolEvent, Usage, UsageEvent};
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn formats_numbers_with_compact_units() {
@@ -2626,6 +2518,7 @@ mod tests {
         assert!(source_filter_includes(SourceFilter::All, Source::Claude));
         assert!(source_filter_includes(SourceFilter::All, Source::Codex));
         assert!(source_filter_includes(SourceFilter::All, Source::OpenCode));
+        assert!(source_filter_includes(SourceFilter::All, Source::Pi));
         assert!(source_filter_includes(SourceFilter::Claude, Source::Claude));
         assert!(!source_filter_includes(SourceFilter::Claude, Source::Codex));
         assert!(!source_filter_includes(
@@ -2642,6 +2535,8 @@ mod tests {
             SourceFilter::OpenCode,
             Source::Codex
         ));
+        assert!(source_filter_includes(SourceFilter::Pi, Source::Pi));
+        assert!(!source_filter_includes(SourceFilter::Pi, Source::OpenCode));
     }
 
     #[test]
@@ -2664,33 +2559,29 @@ mod tests {
     }
 
     #[test]
-    fn builds_obsidian_dashboard_with_configured_snapshot_path() {
-        let markdown = obsidian_dashboard_markdown(
+    fn builds_single_file_obsidian_dashboard_with_current_sections() {
+        let markdown = obsidian_dashboard_markdown_with_home(
             Path::new("data/tokencheck.json"),
-            Path::new("2 - Docs/token-check/Token Usage Dashboard.md"),
+            Path::new("2 - Docs/token-check/Dashboard.md"),
+            Some(Path::new("/Users/hanlife02")),
         );
 
         assert!(markdown.contains("source: data/tokencheck.json"));
         assert!(markdown.contains("tags:\n  - token-check\n  - hanlife02"));
-        assert!(markdown.contains("[Summary](<Token Usage Dashboard - Summary.md>)"));
-        assert!(markdown.contains("[Recent Days](<Token Usage Dashboard - Recent Days.md>)"));
-        assert!(!markdown.contains("__TOKENCHECK_HOME_PATH__"));
-    }
-
-    #[test]
-    fn injects_home_path_for_obsidian_display_helpers() {
-        let markdown = obsidian_dashboard_section_markdown_with_home(
-            Path::new("data/tokencheck.json"),
-            Path::new("/Users/hanlife02/vault/Token Usage Dashboard.md"),
-            Path::new("/Users/hanlife02/vault/Token Usage Dashboard - Summary.md"),
-            OBSIDIAN_DASHBOARD_SUMMARY_TEMPLATE,
-            Some(Path::new("/Users/hanlife02")),
-        );
-
         assert!(markdown.contains(r#"const configuredHomePath = "/Users/hanlife02";"#));
-        assert!(markdown.contains(r#"[Dashboard](<Token Usage Dashboard.md>)"#));
-        assert!(markdown.contains(r#"const snapshotPath = "data/tokencheck.json";"#));
-        assert!(markdown.contains("tags:\n  - token-check\n  - hanlife02"));
+        for heading in [
+            "## Summary",
+            "## Recent Days",
+            "## Top Models",
+            "## Top Projects",
+            "## Top Tools",
+        ] {
+            assert!(markdown.contains(heading));
+        }
+        assert_eq!(markdown.matches("```dataviewjs").count(), 5);
+        assert!(markdown.contains("const rangeStart = addDays(today, -364);"));
+        assert_eq!(markdown.matches("ranked.slice(0, 10)").count(), 3);
+        assert!(!markdown.contains("__TOKENCHECK_"));
     }
 
     #[test]
@@ -2705,20 +2596,23 @@ mod tests {
     }
 
     #[test]
-    fn builds_obsidian_dashboard_section_files_next_to_dashboard() {
-        let sections =
-            obsidian_dashboard_section_files(Path::new("2 - Docs/token-check/Token Usage.md"));
+    fn writes_only_the_configured_obsidian_dashboard_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tokencheck-obsidian-{nonce}"));
+        let dashboard = root.join("Dashboard.md");
 
-        assert_eq!(sections.len(), 5);
-        assert_eq!(sections[0].title, "Summary");
-        assert_eq!(
-            sections[0].path,
-            Path::new("2 - Docs/token-check/Token Usage - Summary.md")
-        );
-        assert_eq!(
-            sections[4].path,
-            Path::new("2 - Docs/token-check/Token Usage - Top Tools.md")
-        );
+        write_obsidian_dashboard(Path::new("data/tokencheck.json"), &dashboard).unwrap();
+
+        let files = fs::read_dir(&root)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), dashboard);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

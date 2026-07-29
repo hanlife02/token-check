@@ -89,6 +89,7 @@ pub enum SourcePreference {
     Claude,
     Codex,
     OpenCode,
+    Pi,
 }
 
 impl SourcePreference {
@@ -98,6 +99,7 @@ impl SourcePreference {
             SourcePreference::Claude => "claude",
             SourcePreference::Codex => "codex",
             SourcePreference::OpenCode => "opencode",
+            SourcePreference::Pi => "pi",
         }
     }
 
@@ -107,6 +109,7 @@ impl SourcePreference {
             "claude" | "c" => Some(SourcePreference::Claude),
             "codex" | "x" => Some(SourcePreference::Codex),
             "opencode" | "open-code" | "oc" | "o" => Some(SourcePreference::OpenCode),
+            "pi" | "p" => Some(SourcePreference::Pi),
             _ => None,
         }
     }
@@ -249,6 +252,7 @@ mod tests {
             SourcePreference::parse("opencode"),
             Some(SourcePreference::OpenCode)
         );
+        assert_eq!(SourcePreference::parse("pi"), Some(SourcePreference::Pi));
         assert_eq!(SourcePreference::parse("bad"), None);
     }
 

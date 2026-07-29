@@ -1,6 +1,6 @@
 ---
 name: tokencheck
-description: "Use when the user asks how to install, configure, run, troubleshoot, or integrate the tokencheck/tkc CLI for local Claude Code, Codex, and OpenCode token usage reports, snapshots, pricing, terminal charts, or Obsidian dashboards."
+description: "Use when the user asks how to install, configure, run, troubleshoot, or integrate the tokencheck/tkc CLI for local Claude Code, Codex, OpenCode, and Pi token usage reports, snapshots, pricing, terminal charts, or Obsidian dashboards."
 ---
 
 # Tokencheck
@@ -76,6 +76,7 @@ Source filters:
 tkc summary --source claude
 tkc models --source codex
 tkc days --source opencode
+tkc tools --source pi
 ```
 
 Date filters are inclusive and affect report commands only:
@@ -112,7 +113,7 @@ Blank input keeps and saves the current value. `none`, `null`, or `-` clears opt
 
 Important config fields:
 
-- `source`: default data source, one of `all`, `claude`, `codex`, or `opencode`.
+- `source`: default data source, one of `all`, `claude`, `codex`, `opencode`, or `pi`.
 - `data_file`: default JSON snapshot path used by `fetch` and `--from-json`.
 - `pricing_file`: optional custom pricing JSON.
 - `obsidian_snapshot_file`: JSON snapshot path for Obsidian integration.
@@ -170,13 +171,15 @@ Refresh the snapshot first, then update the dashboard:
 tkc obsidian --fetch
 ```
 
-The generated dashboard file is a lightweight index. `tkc obsidian` also writes adjacent section notes for Summary, Recent Days, Top Models, Top Projects, and Top Tools. Each section note uses DataviewJS and reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`.
+The generated dashboard is one Markdown file with five DataviewJS sections: Summary, Recent Days, Top Models, Top Projects, and Top Tools. Recent Days renders a 365-day usage heatmap, while the three Top sections show the 10 highest-ranked models, projects, and tools. The dashboard reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`, adapts to Obsidian light and dark themes, and allows the annual heatmap to scroll horizontally in narrow panes.
+
+`tkc obsidian` overwrites the configured dashboard file. It does not delete adjacent section notes created by older versions because users may have edited them.
 
 Obsidian requirements:
 
 - Install and enable the Dataview community plugin.
 - Enable Dataview JavaScript queries.
-- Open the configured dashboard Markdown file, then follow a section link.
+- Open the configured dashboard Markdown file.
 
 ## Troubleshooting
 
@@ -191,6 +194,7 @@ Common fixes:
 - Missing Claude data: confirm `$HOME/.claude/projects` exists or pass `--home`.
 - Missing Codex data: confirm `$HOME/.codex/sessions` exists or pass `--home`.
 - Missing OpenCode data: confirm `$HOME/.local/share/opencode` exists or pass `--home`.
+- Missing Pi data: confirm `$HOME/.pi/agent/sessions` exists or pass `--home`.
 - No saved history: run `tkc fetch`.
 - Obsidian dashboard missing data: run `tkc obsidian --fetch`, then reopen or refresh the note.
 - JSON file is hidden in Obsidian: enable `Files and links -> Detect all file extensions`, or use the Dashboard Markdown instead of opening JSON directly.
