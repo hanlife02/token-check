@@ -4,7 +4,7 @@
 
 - crates.io 包名：`ethan-tkc`
 - 安装后命令：`tkc`、`tokencheck`
-- 当前版本：`1.0.0`
+- 当前版本：`1.1.0`
 - License：MIT
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
@@ -310,7 +310,7 @@ tkc obsidian \
   --dashboard-file "/Users/you/Vault/2 - Docs/token-check/Token Usage Dashboard.md"
 ```
 
-生成结果是单个 Dashboard Markdown 文件，按顺序包含 Summary、Recent Days、Top Models、Top Projects 和 Top Tools 五个 DataviewJS 区块。Recent Days 显示最近 365 天的用量热力图；三个 Top 区块分别显示前 10 个模型、项目和工具。Dashboard 会适配 Obsidian 明暗主题，年度热力图在窄窗口中可横向滚动。
+生成结果是单个 Dashboard Markdown 文件，按顺序包含 Summary、Recent Days、Top Models、Top Projects 和 Top Tools 五个 DataviewJS 区块。Summary 使用总 token 主指标和紧凑统计网格；Recent Days 保持最近 365 天的用量热力图；三个 Top 区块使用饼图展示分布，只单独列出占比不低于 5% 的模型、项目或工具，其余合并为 `Other`。鼠标移到饼图扇区时会显示对应名称、数值和占比。Dashboard 会适配 Obsidian 明暗主题，年度热力图在窄窗口中可横向滚动。
 
 每次运行 `tkc obsidian` 都会覆盖配置指定的 Dashboard 文件，但不会删除旧版本生成的相邻分块文件，避免移除用户可能手动修改过的笔记。Obsidian 侧需要安装并启用 Dataview 插件，同时打开 Dataview 的 JavaScript 查询功能。
 

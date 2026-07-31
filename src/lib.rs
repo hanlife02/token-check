@@ -2580,7 +2580,21 @@ mod tests {
         }
         assert_eq!(markdown.matches("```dataviewjs").count(), 5);
         assert!(markdown.contains("const rangeStart = addDays(today, -364);"));
-        assert_eq!(markdown.matches("ranked.slice(0, 10)").count(), 3);
+        assert_eq!(markdown.matches("const minimumShare = 0.05;").count(), 3);
+        assert_eq!(markdown.matches("function groupSmallSlices").count(), 3);
+        assert_eq!(markdown.matches("function renderPieChart").count(), 3);
+        assert_eq!(markdown.matches("value / total >= minimumShare").count(), 3);
+        assert_eq!(markdown.matches("function showSliceDetails").count(), 3);
+        assert_eq!(
+            markdown
+                .matches("plot.addEventListener(\"mousemove\"")
+                .count(),
+            3
+        );
+        assert!(markdown.contains("const summaryGrid = appendElement"));
+        assert!(!markdown.contains("title: details"));
+        assert!(!markdown.contains("dv.table("));
+        assert!(!markdown.contains("ranked.slice(0, 10)"));
         assert!(!markdown.contains("__TOKENCHECK_"));
     }
 

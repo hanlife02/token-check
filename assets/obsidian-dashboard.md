@@ -41,6 +41,15 @@ function compact(value) {
   return number.format(value);
 }
 
+function appendElement(parent, tag, text = "", options = {}) {
+  const element = document.createElement(tag);
+  if (text) element.textContent = text;
+  for (const [name, value] of Object.entries(options.attrs ?? {})) element.setAttribute(name, value);
+  Object.assign(element.style, options.style ?? {});
+  parent.appendChild(element);
+  return element;
+}
+
 function displayPath(value) {
   const text = String(value ?? "");
   if (!text) return text;
@@ -79,18 +88,80 @@ try {
     [...sessions, ...usageEvents].map(modelKey).filter(Boolean)
   ).size;
 
-  dv.table(
-    ["Metric", "Value"],
-    [
-      ["Sessions", number.format(sessions.length)],
-      ["Usage events", number.format(usageEvents.length)],
-      ["Tool calls", number.format(toolEvents.length)],
-      ["Projects", number.format(projectCount)],
-      ["Models", number.format(modelCount)],
-      ["Total tokens", compact(totalTokens)],
-      ["Snapshot", displayPath(snapshotPath)],
-    ]
-  );
+  const summary = appendElement(dv.container, "div", "", {
+    attrs: { "aria-label": "Token usage summary" },
+    style: { margin: "0.5rem 0 1.5rem" },
+  });
+  const primary = appendElement(summary, "div", "", {
+    style: {
+      padding: "0.75rem 0 1rem",
+      borderBottom: "1px solid var(--background-modifier-border)",
+    },
+  });
+  appendElement(primary, "div", "Total tokens", {
+    style: { color: "var(--text-muted)", fontSize: "0.8rem", fontWeight: "600" },
+  });
+  appendElement(primary, "div", compact(totalTokens), {
+    attrs: { title: number.format(totalTokens) },
+    style: {
+      marginTop: "0.25rem",
+      color: "var(--text-normal)",
+      fontSize: "2rem",
+      fontWeight: "700",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.1",
+    },
+  });
+
+  const summaryGrid = appendElement(summary, "div", "", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))",
+      gap: "0.5rem",
+      padding: "1rem 0 0.75rem",
+    },
+  });
+  [
+    ["Sessions", sessions.length],
+    ["Usage events", usageEvents.length],
+    ["Tool calls", toolEvents.length],
+    ["Projects", projectCount],
+    ["Models", modelCount],
+  ].forEach(([label, value]) => {
+    const metric = appendElement(summaryGrid, "div", "", {
+      style: {
+        minWidth: "0",
+        padding: "0.75rem",
+        borderRadius: "6px",
+        background: "var(--background-secondary)",
+      },
+    });
+    appendElement(metric, "div", label, {
+      style: { color: "var(--text-muted)", fontSize: "0.75rem", lineHeight: "1.4" },
+    });
+    appendElement(metric, "div", number.format(value), {
+      style: {
+        marginTop: "0.25rem",
+        color: "var(--text-normal)",
+        fontSize: "1.15rem",
+        fontWeight: "650",
+        fontVariantNumeric: "tabular-nums",
+        lineHeight: "1.2",
+      },
+    });
+  });
+
+  appendElement(summary, "div", `Snapshot · ${displayPath(snapshotPath)}`, {
+    attrs: { title: displayPath(snapshotPath) },
+    style: {
+      overflow: "hidden",
+      color: "var(--text-faint)",
+      fontSize: "0.75rem",
+      lineHeight: "1.4",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+    },
+  });
 } catch (error) {
   dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
 }
@@ -395,6 +466,7 @@ try {
 
 ```dataviewjs
 const snapshotPath = "__TOKENCHECK_SNAPSHOT_PATH__";
+const minimumShare = 0.05;
 
 function tokenTotal(usage = {}) {
   return usage.total || ((usage.input ?? 0) + (usage.cached_input ?? 0) + (usage.cache_creation_input ?? 0) + (usage.output ?? 0) + (usage.reasoning_output ?? 0));
@@ -443,104 +515,169 @@ function percentage(value, total) {
   return share < 0.1 ? "<0.1%" : `${share.toFixed(1)}%`;
 }
 
-function renderRanking(items, total, unit, accent) {
-  if (items.length === 0) {
+function groupSmallSlices(items, total) {
+  const slices = [];
+  let otherValue = 0;
+  for (const [label, value] of items) {
+    if (total > 0 && value / total >= minimumShare) {
+      slices.push([label, value]);
+    } else {
+      otherValue += value;
+    }
+  }
+  if (otherValue > 0) slices.push(["Other", otherValue]);
+  return slices;
+}
+
+function showSliceDetails(tooltip, segment, total, unit) {
+  if (!segment) {
+    tooltip.textContent = "";
+    tooltip.style.opacity = "0";
+    return;
+  }
+  tooltip.textContent = `${segment.label} · ${compact(segment.value)} ${unit} · ${percentage(segment.value, total)}`;
+  tooltip.style.opacity = "1";
+}
+
+function renderPieChart(items, total, unit, palette, otherColor) {
+  if (items.length === 0 || total <= 0) {
     dv.paragraph(`No ${unit} data found.`);
     return;
   }
 
-  const maxValue = Math.max(...items.map(([, value]) => value), 0);
+  const slices = groupSmallSlices(items, total);
+  let offset = 0;
+  const segments = slices.map(([label, value], index) => {
+    const start = offset;
+    offset += (value / total) * 100;
+    return {
+      label,
+      value,
+      start,
+      end: offset,
+      color: label === "Other" ? otherColor : palette[index % palette.length],
+    };
+  });
+  const details = segments
+    .map(({ label, value }) => `${label}: ${compact(value)} ${unit}, ${percentage(value, total)}`)
+    .join("; ");
   const chart = appendElement(dv.container, "div", "", {
-    attrs: { role: "list", "aria-label": `Top ${items.length} ${unit}` },
+    attrs: { role: "group", "aria-label": `${unit} distribution` },
     style: {
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: "1.5rem",
       width: "100%",
       maxWidth: "100%",
       minWidth: "0",
       boxSizing: "border-box",
       margin: "0.5rem 0 1.5rem",
-      padding: "0.8rem 1rem 0.65rem",
-      border: "1px solid var(--background-modifier-border)",
-      borderRadius: "8px",
-      background: "var(--background-primary)",
+      padding: "1rem 0",
+      borderTop: "1px solid var(--background-modifier-border)",
+      borderBottom: "1px solid var(--background-modifier-border)",
     },
   });
 
-  appendElement(chart, "div", `Top ${items.length} · ${compact(total)} ${unit} total`, {
-    style: { marginBottom: "0.35rem", color: "var(--text-muted)", fontSize: "0.8em" },
+  const plotArea = appendElement(chart, "div", "", {
+    style: {
+      display: "flex",
+      flex: "1 1 220px",
+      flexDirection: "column",
+      alignItems: "center",
+      minWidth: "0",
+    },
+  });
+  const plot = appendElement(plotArea, "div", "", {
+    attrs: { role: "img", "aria-label": details },
+    style: {
+      width: "220px",
+      maxWidth: "100%",
+      aspectRatio: "1",
+      margin: "0 auto",
+      borderRadius: "50%",
+      background: `conic-gradient(${segments.map(({ color, start, end }) => `${color} ${start}% ${end}%`).join(", ")})`,
+    },
+  });
+  const tooltip = appendElement(plotArea, "div", "", {
+    attrs: { "aria-live": "polite" },
+    style: {
+      minHeight: "1.4rem",
+      marginTop: "0.5rem",
+      color: "var(--text-muted)",
+      fontSize: "0.75rem",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.4",
+      opacity: "0",
+      textAlign: "center",
+      transition: "opacity 120ms ease-out",
+    },
+  });
+  plot.addEventListener("mousemove", (event) => {
+    const rect = plot.getBoundingClientRect();
+    const x = event.clientX - rect.left - rect.width / 2;
+    const y = event.clientY - rect.top - rect.height / 2;
+    const radius = Math.min(rect.width, rect.height) / 2;
+    if (Math.hypot(x, y) > radius) {
+      showSliceDetails(tooltip, null, total, unit);
+      return;
+    }
+    const angle = (Math.atan2(y, x) * 180 / Math.PI + 450) % 360;
+    const position = angle / 3.6;
+    const segment = segments.find(({ start, end }) => position >= start && position < end) ?? segments[segments.length - 1];
+    showSliceDetails(tooltip, segment, total, unit);
+  });
+  plot.addEventListener("mouseleave", () => showSliceDetails(tooltip, null, total, unit));
+
+  const legend = appendElement(chart, "div", "", {
+    attrs: { role: "list", "aria-label": `${unit} distribution details` },
+    style: { flex: "2 1 260px", minWidth: "0" },
+  });
+  appendElement(legend, "div", `${compact(total)} ${unit}`, {
+    attrs: { title: `${total} ${unit}` },
+    style: {
+      marginBottom: "0.5rem",
+      color: "var(--text-normal)",
+      fontSize: "1.15rem",
+      fontWeight: "650",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.2",
+    },
   });
 
-  items.forEach(([label, value], index) => {
+  segments.forEach(({ label, value, color }) => {
     const share = percentage(value, total);
-    const width = maxValue ? Math.max(1.5, (value / maxValue) * 100) : 0;
-    const details = `${index + 1}. ${label}: ${compact(value)} ${unit}, ${share} of total`;
-    const row = appendElement(chart, "div", "", {
-      attrs: { role: "listitem", title: details, "aria-label": details },
+    const rowDetails = `${label}: ${compact(value)} ${unit}, ${share}`;
+    const row = appendElement(legend, "div", "", {
+      attrs: { role: "listitem", title: rowDetails, "aria-label": rowDetails },
       style: {
         display: "grid",
-        gridTemplateColumns: "24px minmax(0, 1fr)",
-        columnGap: "0.55rem",
-        padding: "0.55rem 0",
-        borderBottom: index < items.length - 1 ? "1px solid var(--background-modifier-border)" : "none",
+        gridTemplateColumns: "12px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: "0.5rem",
+        padding: "0.35rem 0",
       },
     });
-
-    appendElement(row, "span", String(index + 1), {
-      style: {
-        color: "var(--text-faint)",
-        fontSize: "0.78em",
-        fontVariantNumeric: "tabular-nums",
-        lineHeight: "1.5",
-        textAlign: "right",
-      },
+    appendElement(row, "span", "", {
+      style: { width: "12px", height: "12px", borderRadius: "2px", background: color },
     });
-
-    const content = appendElement(row, "div", "", { style: { minWidth: "0" } });
-    const heading = appendElement(content, "div", "", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "baseline",
-        gap: "0.75rem",
-        minWidth: "0",
-      },
-    });
-    appendElement(heading, "span", label, {
+    appendElement(row, "span", label, {
       attrs: { title: label },
       style: {
         minWidth: "0",
-        overflow: "hidden",
         color: "var(--text-normal)",
-        fontSize: "0.88em",
+        fontSize: "0.8rem",
         fontWeight: "600",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
+        lineHeight: "1.4",
+        overflowWrap: "anywhere",
       },
     });
-    appendElement(heading, "span", `${compact(value)} · ${share}`, {
+    appendElement(row, "span", `${compact(value)} · ${share}`, {
       style: {
-        flexShrink: "0",
         color: "var(--text-muted)",
-        fontSize: "0.76em",
+        fontSize: "0.75rem",
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
-      },
-    });
-
-    const track = appendElement(content, "div", "", {
-      style: {
-        height: "8px",
-        marginTop: "0.38rem",
-        overflow: "hidden",
-        borderRadius: "999px",
-        background: "var(--background-modifier-border)",
-      },
-    });
-    appendElement(track, "div", "", {
-      style: {
-        width: `${width}%`,
-        height: "100%",
-        borderRadius: "999px",
-        background: accent,
       },
     });
   });
@@ -551,8 +688,11 @@ try {
   const data = JSON.parse(raw);
   const ranked = groupBy(data.usage_events ?? [], modelKey, (event) => tokenTotal(event.usage));
   const total = ranked.reduce((sum, [, value]) => sum + value, 0);
-  const accent = document.body.classList.contains("theme-dark") ? "#3fb950" : "#2da44e";
-  renderRanking(ranked.slice(0, 10), total, "tokens", accent);
+  const dark = document.body.classList.contains("theme-dark");
+  const palette = dark
+    ? ["#58a6ff", "#56d364", "#d2a8ff", "#f2cc60", "#ff7b72", "#39c5cf", "#ffa657", "#db61a2"]
+    : ["#4e79a7", "#59a14f", "#af7aa1", "#edc948", "#e15759", "#76b7b2", "#f28e2b", "#ff9da7"];
+  renderPieChart(ranked, total, "tokens", palette, dark ? "#8b949e" : "#bab0ab");
 } catch (error) {
   dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
 }
@@ -563,6 +703,7 @@ try {
 ```dataviewjs
 const snapshotPath = "__TOKENCHECK_SNAPSHOT_PATH__";
 const configuredHomePath = "__TOKENCHECK_HOME_PATH__";
+const minimumShare = 0.05;
 
 function inferHomePath() {
   const basePath = app?.vault?.adapter?.basePath;
@@ -614,104 +755,169 @@ function percentage(value, total) {
   return share < 0.1 ? "<0.1%" : `${share.toFixed(1)}%`;
 }
 
-function renderRanking(items, total, unit, accent) {
-  if (items.length === 0) {
+function groupSmallSlices(items, total) {
+  const slices = [];
+  let otherValue = 0;
+  for (const [label, value] of items) {
+    if (total > 0 && value / total >= minimumShare) {
+      slices.push([label, value]);
+    } else {
+      otherValue += value;
+    }
+  }
+  if (otherValue > 0) slices.push(["Other", otherValue]);
+  return slices;
+}
+
+function showSliceDetails(tooltip, segment, total, unit) {
+  if (!segment) {
+    tooltip.textContent = "";
+    tooltip.style.opacity = "0";
+    return;
+  }
+  tooltip.textContent = `${segment.label} · ${compact(segment.value)} ${unit} · ${percentage(segment.value, total)}`;
+  tooltip.style.opacity = "1";
+}
+
+function renderPieChart(items, total, unit, palette, otherColor) {
+  if (items.length === 0 || total <= 0) {
     dv.paragraph(`No ${unit} data found.`);
     return;
   }
 
-  const maxValue = Math.max(...items.map(([, value]) => value), 0);
+  const slices = groupSmallSlices(items, total);
+  let offset = 0;
+  const segments = slices.map(([label, value], index) => {
+    const start = offset;
+    offset += (value / total) * 100;
+    return {
+      label,
+      value,
+      start,
+      end: offset,
+      color: label === "Other" ? otherColor : palette[index % palette.length],
+    };
+  });
+  const details = segments
+    .map(({ label, value }) => `${label}: ${compact(value)} ${unit}, ${percentage(value, total)}`)
+    .join("; ");
   const chart = appendElement(dv.container, "div", "", {
-    attrs: { role: "list", "aria-label": `Top ${items.length} ${unit}` },
+    attrs: { role: "group", "aria-label": `${unit} distribution` },
     style: {
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: "1.5rem",
       width: "100%",
       maxWidth: "100%",
       minWidth: "0",
       boxSizing: "border-box",
       margin: "0.5rem 0 1.5rem",
-      padding: "0.8rem 1rem 0.65rem",
-      border: "1px solid var(--background-modifier-border)",
-      borderRadius: "8px",
-      background: "var(--background-primary)",
+      padding: "1rem 0",
+      borderTop: "1px solid var(--background-modifier-border)",
+      borderBottom: "1px solid var(--background-modifier-border)",
     },
   });
 
-  appendElement(chart, "div", `Top ${items.length} · ${compact(total)} ${unit} total`, {
-    style: { marginBottom: "0.35rem", color: "var(--text-muted)", fontSize: "0.8em" },
+  const plotArea = appendElement(chart, "div", "", {
+    style: {
+      display: "flex",
+      flex: "1 1 220px",
+      flexDirection: "column",
+      alignItems: "center",
+      minWidth: "0",
+    },
+  });
+  const plot = appendElement(plotArea, "div", "", {
+    attrs: { role: "img", "aria-label": details },
+    style: {
+      width: "220px",
+      maxWidth: "100%",
+      aspectRatio: "1",
+      margin: "0 auto",
+      borderRadius: "50%",
+      background: `conic-gradient(${segments.map(({ color, start, end }) => `${color} ${start}% ${end}%`).join(", ")})`,
+    },
+  });
+  const tooltip = appendElement(plotArea, "div", "", {
+    attrs: { "aria-live": "polite" },
+    style: {
+      minHeight: "1.4rem",
+      marginTop: "0.5rem",
+      color: "var(--text-muted)",
+      fontSize: "0.75rem",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.4",
+      opacity: "0",
+      textAlign: "center",
+      transition: "opacity 120ms ease-out",
+    },
+  });
+  plot.addEventListener("mousemove", (event) => {
+    const rect = plot.getBoundingClientRect();
+    const x = event.clientX - rect.left - rect.width / 2;
+    const y = event.clientY - rect.top - rect.height / 2;
+    const radius = Math.min(rect.width, rect.height) / 2;
+    if (Math.hypot(x, y) > radius) {
+      showSliceDetails(tooltip, null, total, unit);
+      return;
+    }
+    const angle = (Math.atan2(y, x) * 180 / Math.PI + 450) % 360;
+    const position = angle / 3.6;
+    const segment = segments.find(({ start, end }) => position >= start && position < end) ?? segments[segments.length - 1];
+    showSliceDetails(tooltip, segment, total, unit);
+  });
+  plot.addEventListener("mouseleave", () => showSliceDetails(tooltip, null, total, unit));
+
+  const legend = appendElement(chart, "div", "", {
+    attrs: { role: "list", "aria-label": `${unit} distribution details` },
+    style: { flex: "2 1 260px", minWidth: "0" },
+  });
+  appendElement(legend, "div", `${compact(total)} ${unit}`, {
+    attrs: { title: `${total} ${unit}` },
+    style: {
+      marginBottom: "0.5rem",
+      color: "var(--text-normal)",
+      fontSize: "1.15rem",
+      fontWeight: "650",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.2",
+    },
   });
 
-  items.forEach(([label, value], index) => {
+  segments.forEach(({ label, value, color }) => {
     const share = percentage(value, total);
-    const width = maxValue ? Math.max(1.5, (value / maxValue) * 100) : 0;
-    const details = `${index + 1}. ${label}: ${compact(value)} ${unit}, ${share} of total`;
-    const row = appendElement(chart, "div", "", {
-      attrs: { role: "listitem", title: details, "aria-label": details },
+    const rowDetails = `${label}: ${compact(value)} ${unit}, ${share}`;
+    const row = appendElement(legend, "div", "", {
+      attrs: { role: "listitem", title: rowDetails, "aria-label": rowDetails },
       style: {
         display: "grid",
-        gridTemplateColumns: "24px minmax(0, 1fr)",
-        columnGap: "0.55rem",
-        padding: "0.55rem 0",
-        borderBottom: index < items.length - 1 ? "1px solid var(--background-modifier-border)" : "none",
+        gridTemplateColumns: "12px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: "0.5rem",
+        padding: "0.35rem 0",
       },
     });
-
-    appendElement(row, "span", String(index + 1), {
-      style: {
-        color: "var(--text-faint)",
-        fontSize: "0.78em",
-        fontVariantNumeric: "tabular-nums",
-        lineHeight: "1.5",
-        textAlign: "right",
-      },
+    appendElement(row, "span", "", {
+      style: { width: "12px", height: "12px", borderRadius: "2px", background: color },
     });
-
-    const content = appendElement(row, "div", "", { style: { minWidth: "0" } });
-    const heading = appendElement(content, "div", "", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "baseline",
-        gap: "0.75rem",
-        minWidth: "0",
-      },
-    });
-    appendElement(heading, "span", label, {
+    appendElement(row, "span", label, {
       attrs: { title: label },
       style: {
         minWidth: "0",
-        overflow: "hidden",
         color: "var(--text-normal)",
-        fontSize: "0.88em",
+        fontSize: "0.8rem",
         fontWeight: "600",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
+        lineHeight: "1.4",
+        overflowWrap: "anywhere",
       },
     });
-    appendElement(heading, "span", `${compact(value)} · ${share}`, {
+    appendElement(row, "span", `${compact(value)} · ${share}`, {
       style: {
-        flexShrink: "0",
         color: "var(--text-muted)",
-        fontSize: "0.76em",
+        fontSize: "0.75rem",
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
-      },
-    });
-
-    const track = appendElement(content, "div", "", {
-      style: {
-        height: "8px",
-        marginTop: "0.38rem",
-        overflow: "hidden",
-        borderRadius: "999px",
-        background: "var(--background-modifier-border)",
-      },
-    });
-    appendElement(track, "div", "", {
-      style: {
-        width: `${width}%`,
-        height: "100%",
-        borderRadius: "999px",
-        background: accent,
       },
     });
   });
@@ -722,8 +928,11 @@ try {
   const data = JSON.parse(raw);
   const ranked = groupBy(data.usage_events ?? [], (event) => displayPath(event.project), (event) => tokenTotal(event.usage));
   const total = ranked.reduce((sum, [, value]) => sum + value, 0);
-  const accent = document.body.classList.contains("theme-dark") ? "#58a6ff" : "#0969da";
-  renderRanking(ranked.slice(0, 10), total, "tokens", accent);
+  const dark = document.body.classList.contains("theme-dark");
+  const palette = dark
+    ? ["#58a6ff", "#56d364", "#d2a8ff", "#f2cc60", "#ff7b72", "#39c5cf", "#ffa657", "#db61a2"]
+    : ["#4e79a7", "#59a14f", "#af7aa1", "#edc948", "#e15759", "#76b7b2", "#f28e2b", "#ff9da7"];
+  renderPieChart(ranked, total, "tokens", palette, dark ? "#8b949e" : "#bab0ab");
 } catch (error) {
   dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
 }
@@ -733,6 +942,7 @@ try {
 
 ```dataviewjs
 const snapshotPath = "__TOKENCHECK_SNAPSHOT_PATH__";
+const minimumShare = 0.05;
 
 function compact(value) {
   return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value || 0);
@@ -763,104 +973,169 @@ function percentage(value, total) {
   return share < 0.1 ? "<0.1%" : `${share.toFixed(1)}%`;
 }
 
-function renderRanking(items, total, unit, accent) {
-  if (items.length === 0) {
+function groupSmallSlices(items, total) {
+  const slices = [];
+  let otherValue = 0;
+  for (const [label, value] of items) {
+    if (total > 0 && value / total >= minimumShare) {
+      slices.push([label, value]);
+    } else {
+      otherValue += value;
+    }
+  }
+  if (otherValue > 0) slices.push(["Other", otherValue]);
+  return slices;
+}
+
+function showSliceDetails(tooltip, segment, total, unit) {
+  if (!segment) {
+    tooltip.textContent = "";
+    tooltip.style.opacity = "0";
+    return;
+  }
+  tooltip.textContent = `${segment.label} · ${compact(segment.value)} ${unit} · ${percentage(segment.value, total)}`;
+  tooltip.style.opacity = "1";
+}
+
+function renderPieChart(items, total, unit, palette, otherColor) {
+  if (items.length === 0 || total <= 0) {
     dv.paragraph(`No ${unit} data found.`);
     return;
   }
 
-  const maxValue = Math.max(...items.map(([, value]) => value), 0);
+  const slices = groupSmallSlices(items, total);
+  let offset = 0;
+  const segments = slices.map(([label, value], index) => {
+    const start = offset;
+    offset += (value / total) * 100;
+    return {
+      label,
+      value,
+      start,
+      end: offset,
+      color: label === "Other" ? otherColor : palette[index % palette.length],
+    };
+  });
+  const details = segments
+    .map(({ label, value }) => `${label}: ${compact(value)} ${unit}, ${percentage(value, total)}`)
+    .join("; ");
   const chart = appendElement(dv.container, "div", "", {
-    attrs: { role: "list", "aria-label": `Top ${items.length} ${unit}` },
+    attrs: { role: "group", "aria-label": `${unit} distribution` },
     style: {
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: "1.5rem",
       width: "100%",
       maxWidth: "100%",
       minWidth: "0",
       boxSizing: "border-box",
       margin: "0.5rem 0 1.5rem",
-      padding: "0.8rem 1rem 0.65rem",
-      border: "1px solid var(--background-modifier-border)",
-      borderRadius: "8px",
-      background: "var(--background-primary)",
+      padding: "1rem 0",
+      borderTop: "1px solid var(--background-modifier-border)",
+      borderBottom: "1px solid var(--background-modifier-border)",
     },
   });
 
-  appendElement(chart, "div", `Top ${items.length} · ${compact(total)} ${unit} total`, {
-    style: { marginBottom: "0.35rem", color: "var(--text-muted)", fontSize: "0.8em" },
+  const plotArea = appendElement(chart, "div", "", {
+    style: {
+      display: "flex",
+      flex: "1 1 220px",
+      flexDirection: "column",
+      alignItems: "center",
+      minWidth: "0",
+    },
+  });
+  const plot = appendElement(plotArea, "div", "", {
+    attrs: { role: "img", "aria-label": details },
+    style: {
+      width: "220px",
+      maxWidth: "100%",
+      aspectRatio: "1",
+      margin: "0 auto",
+      borderRadius: "50%",
+      background: `conic-gradient(${segments.map(({ color, start, end }) => `${color} ${start}% ${end}%`).join(", ")})`,
+    },
+  });
+  const tooltip = appendElement(plotArea, "div", "", {
+    attrs: { "aria-live": "polite" },
+    style: {
+      minHeight: "1.4rem",
+      marginTop: "0.5rem",
+      color: "var(--text-muted)",
+      fontSize: "0.75rem",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.4",
+      opacity: "0",
+      textAlign: "center",
+      transition: "opacity 120ms ease-out",
+    },
+  });
+  plot.addEventListener("mousemove", (event) => {
+    const rect = plot.getBoundingClientRect();
+    const x = event.clientX - rect.left - rect.width / 2;
+    const y = event.clientY - rect.top - rect.height / 2;
+    const radius = Math.min(rect.width, rect.height) / 2;
+    if (Math.hypot(x, y) > radius) {
+      showSliceDetails(tooltip, null, total, unit);
+      return;
+    }
+    const angle = (Math.atan2(y, x) * 180 / Math.PI + 450) % 360;
+    const position = angle / 3.6;
+    const segment = segments.find(({ start, end }) => position >= start && position < end) ?? segments[segments.length - 1];
+    showSliceDetails(tooltip, segment, total, unit);
+  });
+  plot.addEventListener("mouseleave", () => showSliceDetails(tooltip, null, total, unit));
+
+  const legend = appendElement(chart, "div", "", {
+    attrs: { role: "list", "aria-label": `${unit} distribution details` },
+    style: { flex: "2 1 260px", minWidth: "0" },
+  });
+  appendElement(legend, "div", `${compact(total)} ${unit}`, {
+    attrs: { title: `${total} ${unit}` },
+    style: {
+      marginBottom: "0.5rem",
+      color: "var(--text-normal)",
+      fontSize: "1.15rem",
+      fontWeight: "650",
+      fontVariantNumeric: "tabular-nums",
+      lineHeight: "1.2",
+    },
   });
 
-  items.forEach(([label, value], index) => {
+  segments.forEach(({ label, value, color }) => {
     const share = percentage(value, total);
-    const width = maxValue ? Math.max(1.5, (value / maxValue) * 100) : 0;
-    const details = `${index + 1}. ${label}: ${compact(value)} ${unit}, ${share} of total`;
-    const row = appendElement(chart, "div", "", {
-      attrs: { role: "listitem", title: details, "aria-label": details },
+    const rowDetails = `${label}: ${compact(value)} ${unit}, ${share}`;
+    const row = appendElement(legend, "div", "", {
+      attrs: { role: "listitem", title: rowDetails, "aria-label": rowDetails },
       style: {
         display: "grid",
-        gridTemplateColumns: "24px minmax(0, 1fr)",
-        columnGap: "0.55rem",
-        padding: "0.55rem 0",
-        borderBottom: index < items.length - 1 ? "1px solid var(--background-modifier-border)" : "none",
+        gridTemplateColumns: "12px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: "0.5rem",
+        padding: "0.35rem 0",
       },
     });
-
-    appendElement(row, "span", String(index + 1), {
-      style: {
-        color: "var(--text-faint)",
-        fontSize: "0.78em",
-        fontVariantNumeric: "tabular-nums",
-        lineHeight: "1.5",
-        textAlign: "right",
-      },
+    appendElement(row, "span", "", {
+      style: { width: "12px", height: "12px", borderRadius: "2px", background: color },
     });
-
-    const content = appendElement(row, "div", "", { style: { minWidth: "0" } });
-    const heading = appendElement(content, "div", "", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "baseline",
-        gap: "0.75rem",
-        minWidth: "0",
-      },
-    });
-    appendElement(heading, "span", label, {
+    appendElement(row, "span", label, {
       attrs: { title: label },
       style: {
         minWidth: "0",
-        overflow: "hidden",
         color: "var(--text-normal)",
-        fontSize: "0.88em",
+        fontSize: "0.8rem",
         fontWeight: "600",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
+        lineHeight: "1.4",
+        overflowWrap: "anywhere",
       },
     });
-    appendElement(heading, "span", `${compact(value)} · ${share}`, {
+    appendElement(row, "span", `${compact(value)} · ${share}`, {
       style: {
-        flexShrink: "0",
         color: "var(--text-muted)",
-        fontSize: "0.76em",
+        fontSize: "0.75rem",
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
-      },
-    });
-
-    const track = appendElement(content, "div", "", {
-      style: {
-        height: "8px",
-        marginTop: "0.38rem",
-        overflow: "hidden",
-        borderRadius: "999px",
-        background: "var(--background-modifier-border)",
-      },
-    });
-    appendElement(track, "div", "", {
-      style: {
-        width: `${width}%`,
-        height: "100%",
-        borderRadius: "999px",
-        background: accent,
       },
     });
   });
@@ -871,8 +1146,11 @@ try {
   const data = JSON.parse(raw);
   const ranked = groupBy(data.tool_events ?? [], (event) => `${event.source}/${event.tool}`, () => 1);
   const total = ranked.reduce((sum, [, value]) => sum + value, 0);
-  const accent = document.body.classList.contains("theme-dark") ? "#a371f7" : "#8250df";
-  renderRanking(ranked.slice(0, 10), total, "calls", accent);
+  const dark = document.body.classList.contains("theme-dark");
+  const palette = dark
+    ? ["#58a6ff", "#56d364", "#d2a8ff", "#f2cc60", "#ff7b72", "#39c5cf", "#ffa657", "#db61a2"]
+    : ["#4e79a7", "#59a14f", "#af7aa1", "#edc948", "#e15759", "#76b7b2", "#f28e2b", "#ff9da7"];
+  renderPieChart(ranked, total, "calls", palette, dark ? "#8b949e" : "#bab0ab");
 } catch (error) {
   dv.paragraph(`Could not read ${snapshotPath}: ${error.message}`);
 }

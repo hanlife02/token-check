@@ -171,7 +171,7 @@ Refresh the snapshot first, then update the dashboard:
 tkc obsidian --fetch
 ```
 
-The generated dashboard is one Markdown file with five DataviewJS sections: Summary, Recent Days, Top Models, Top Projects, and Top Tools. Recent Days renders a 365-day usage heatmap, while the three Top sections show the 10 highest-ranked models, projects, and tools. The dashboard reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`, adapts to Obsidian light and dark themes, and allows the annual heatmap to scroll horizontally in narrow panes.
+The generated dashboard is one Markdown file with five DataviewJS sections: Summary, Recent Days, Top Models, Top Projects, and Top Tools. Summary uses one primary total-token metric plus a compact supporting grid. Recent Days retains the 365-day usage heatmap. The three Top sections render pie charts, show categories with at least 5% share separately, combine smaller categories into `Other`, and reveal the slice label, value, and percentage on hover. The dashboard reads the snapshot with a vault-relative path when possible, usually `data/tokencheck.json`, adapts to Obsidian light and dark themes, and allows the annual heatmap to scroll horizontally in narrow panes.
 
 `tkc obsidian` overwrites the configured dashboard file. It does not delete adjacent section notes created by older versions because users may have edited them.
 
