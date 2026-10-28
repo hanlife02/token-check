@@ -1,4 +1,4 @@
-use crate::model::{ReportData, SessionMeta, Source, Usage, UsageEvent};
+use crate::model::{ReportData, SessionMeta, Source, ToolEvent, Usage, UsageEvent};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use rusqlite::Connection;
@@ -39,6 +39,8 @@ pub fn collect(opencode_root: &Path) -> Result<ReportData> {
     let mut sessions = BTreeMap::new();
     let mut usage_events = Vec::new();
     let mut seen_event_ids = BTreeSet::new();
+    let mut tool_events = Vec::new();
+    let mut seen_tool_ids = BTreeSet::new();
 
     collect_session_files(
         &opencode_root.join("storage").join("session"),
@@ -53,6 +55,8 @@ pub fn collect(opencode_root: &Path) -> Result<ReportData> {
             &mut sessions,
             &mut usage_events,
             &mut seen_event_ids,
+            &mut tool_events,
+            &mut seen_tool_ids,
         ) {
             data.warnings.push(format!(
                 "Failed to read OpenCode database {}: {err:#}",
@@ -68,6 +72,8 @@ pub fn collect(opencode_root: &Path) -> Result<ReportData> {
             &mut sessions,
             &mut usage_events,
             &mut seen_event_ids,
+            &mut tool_events,
+            &mut seen_tool_ids,
             &mut data.warnings,
         );
     } else if !db_path.exists() {
@@ -93,6 +99,7 @@ pub fn collect(opencode_root: &Path) -> Result<ReportData> {
         })
         .collect();
     data.usage_events = usage_events;
+    data.tool_events = tool_events;
     Ok(data)
 }
 
@@ -101,12 +108,21 @@ fn collect_db(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
     let connection =
         Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open {}", db_path.display()))?;
     collect_db_sessions(&connection, sessions)?;
-    collect_db_messages(&connection, sessions, usage_events, seen_event_ids)
+    collect_db_messages(
+        &connection,
+        sessions,
+        usage_events,
+        seen_event_ids,
+        tool_events,
+        seen_tool_ids,
+    )
 }
 
 /// OpenCode V1 stores messages in the `session`/`message` tables, V2 in the
@@ -158,6 +174,8 @@ fn collect_db_messages(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
     let legacy = table_exists(connection, "message")?;
     let v2 = table_exists(connection, "session_message")?;
@@ -165,10 +183,24 @@ fn collect_db_messages(
         anyhow::bail!("no supported message table found (expected message or session_message)");
     }
     if legacy {
-        collect_legacy_db_messages(connection, sessions, usage_events, seen_event_ids)?;
+        collect_legacy_db_messages(
+            connection,
+            sessions,
+            usage_events,
+            seen_event_ids,
+            tool_events,
+            seen_tool_ids,
+        )?;
     }
     if v2 {
-        collect_v2_db_messages(connection, sessions, usage_events, seen_event_ids)?;
+        collect_v2_db_messages(
+            connection,
+            sessions,
+            usage_events,
+            seen_event_ids,
+            tool_events,
+            seen_tool_ids,
+        )?;
     }
     Ok(())
 }
@@ -178,6 +210,8 @@ fn collect_legacy_db_messages(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
     let (join, directory, session_created) = if table_exists(connection, "session")? {
         (
@@ -229,6 +263,8 @@ fn collect_legacy_db_messages(
             sessions,
             usage_events,
             seen_event_ids,
+            tool_events,
+            seen_tool_ids,
         );
     }
 
@@ -240,6 +276,8 @@ fn collect_v2_db_messages(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
     let (join, directory, session_created) = if table_exists(connection, "session_v2")? {
         (
@@ -261,7 +299,7 @@ fn collect_v2_db_messages(
                 {session_created}
          from session_message
          {join}
-         where session_message.type = 'assistant'
+         where session_message.type in ('assistant', 'compaction')
          order by session_message.time_created, session_message.seq, session_message.id"
     ))?;
     let rows = statement.query_map([], |row| {
@@ -293,6 +331,8 @@ fn collect_v2_db_messages(
             sessions,
             usage_events,
             seen_event_ids,
+            tool_events,
+            seen_tool_ids,
         );
     }
 
@@ -342,6 +382,8 @@ fn collect_message_files(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) {
     for entry in WalkDir::new(message_root) {
@@ -372,6 +414,8 @@ fn collect_message_files(
                     sessions,
                     usage_events,
                     seen_event_ids,
+                    tool_events,
+                    seen_tool_ids,
                 );
             }
             Err(err) => warnings.push(format!(
@@ -400,6 +444,8 @@ fn collect_message_value(
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
 ) {
     if !context.assistant && value.get("role").and_then(Value::as_str) != Some("assistant") {
         return;
@@ -430,6 +476,15 @@ fn collect_message_value(
         Some(model.clone()),
     );
 
+    collect_tool_parts(
+        value,
+        &session_id,
+        &date,
+        &project,
+        tool_events,
+        seen_tool_ids,
+    );
+
     let Some(tokens) = value.get("tokens") else {
         return;
     };
@@ -446,6 +501,55 @@ fn collect_message_value(
         model,
         usage: opencode_usage(tokens),
     });
+}
+
+/// OpenCode stores tool invocations as `content` parts on the assistant
+/// message (`{"type": "tool", "id": ..., "name": ...}`). Older payloads use
+/// `tool_use`; both carry the same name/id fields.
+fn collect_tool_parts(
+    value: &Value,
+    session_id: &str,
+    date: &str,
+    project: &str,
+    tool_events: &mut Vec<ToolEvent>,
+    seen_tool_ids: &mut BTreeSet<String>,
+) {
+    let Some(parts) = value.get("content").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (index, part) in parts.iter().enumerate() {
+        let kind = part.get("type").and_then(Value::as_str);
+        if kind != Some("tool") && kind != Some("tool_use") {
+            continue;
+        }
+        let Some(tool) = part
+            .get("name")
+            .or_else(|| part.get("tool"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let tool_id = part
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("part-{index}"));
+        let event_id = format!("{session_id}:{tool_id}");
+        if !seen_tool_ids.insert(event_id.clone()) {
+            continue;
+        }
+        let tool_date = millis_at(part, &["/time/completed", "/time/created", "/time/ran"])
+            .map(date_from_millis)
+            .unwrap_or_else(|| date.to_string());
+        tool_events.push(ToolEvent {
+            source: Source::OpenCode,
+            event_id,
+            date: tool_date,
+            project: project.to_string(),
+            tool: tool.to_string(),
+        });
+    }
 }
 
 fn upsert_session(
@@ -587,6 +691,7 @@ fn parent_dir_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{collect, date_from_millis, opencode_usage};
+    use crate::model::Source;
     use rusqlite::Connection;
     use serde_json::json;
     use std::fs;
@@ -650,6 +755,14 @@ mod tests {
         let message = json!({
             "time": {"created": 1_792_933_953_327_i64, "completed": 1_792_933_958_187_i64},
             "model": {"id": "deepseek-v4-flash-0731", "providerID": "zzh"},
+            "content": [
+                {
+                    "type": "tool",
+                    "id": "call_1",
+                    "name": "shell",
+                    "time": {"created": 1_792_933_955_000_i64}
+                }
+            ],
             "tokens": {
                 "input": 9_353,
                 "output": 189,
@@ -687,6 +800,10 @@ mod tests {
         assert_eq!(event.project, "/tmp/v2-project");
         assert_eq!(event.model, "zzh/deepseek-v4-flash-0731");
         assert_eq!(event.usage.computed_total(), 9_542);
+        assert_eq!(data.tool_events.len(), 1);
+        assert_eq!(data.tool_events[0].tool, "shell");
+        assert_eq!(data.tool_events[0].project, "/tmp/v2-project");
+        assert_eq!(data.tool_events[0].source, Source::OpenCode);
 
         let _ = fs::remove_dir_all(root);
     }
