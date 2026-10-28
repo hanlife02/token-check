@@ -296,10 +296,16 @@ pub fn run() -> Result<()> {
     let home = cli.home.clone();
 
     if matches!(command, Command::Fetch) {
+        let obsidian_snapshot = app_config
+            .obsidian_snapshot_file
+            .clone()
+            .map(expand_home_path)
+            .transpose()?;
         return run_fetch(
             settings.source,
             home,
             settings.data_file.clone(),
+            obsidian_snapshot,
             settings.language,
         );
     }
@@ -537,7 +543,7 @@ fn run_obsidian(
     language: Language,
 ) -> Result<()> {
     if fetch {
-        run_fetch(filter, home, snapshot_file.clone(), language)?;
+        run_fetch(filter, home, snapshot_file.clone(), None, language)?;
         println!();
     }
 
@@ -1130,6 +1136,18 @@ fn label_obsidian_dashboard_saved(language: Language) -> &'static str {
     text(language, "Obsidian dashboard saved", "Obsidian 报表已保存")
 }
 
+fn label_obsidian_snapshot_saved(language: Language) -> &'static str {
+    text(language, "Obsidian snapshot saved", "Obsidian 快照已保存")
+}
+
+fn label_obsidian_snapshot_unchanged(language: Language) -> &'static str {
+    text(
+        language,
+        "Obsidian snapshot unchanged",
+        "Obsidian 快照未变化",
+    )
+}
+
 fn label_obsidian_snapshot_missing(language: Language) -> &'static str {
     text(
         language,
@@ -1507,6 +1525,7 @@ fn run_fetch(
     filter: SourceFilter,
     home: Option<PathBuf>,
     data_file: PathBuf,
+    obsidian_snapshot: Option<PathBuf>,
     language: Language,
 ) -> Result<()> {
     let roots = Roots {
@@ -1514,6 +1533,7 @@ fn run_fetch(
     };
     let incoming = collect_data(filter, &roots)?;
     let warnings = incoming.warnings.clone();
+    let obsidian_incoming = obsidian_snapshot.as_ref().map(|_| incoming.clone());
     let file_exists = data_file.exists();
     let mut existing = snapshot::load_or_default(&data_file)?;
     let before = DataCounts::from(&existing);
@@ -1562,6 +1582,28 @@ fn run_fetch(
         format_number(before.total_tokens),
         format_number(after.total_tokens)
     );
+
+    if let (Some(path), Some(incoming)) = (obsidian_snapshot, obsidian_incoming) {
+        if path != data_file {
+            let file_exists = path.exists();
+            let mut existing = snapshot::load_or_default(&path)?;
+            let summary = snapshot::merge_preserving_growth(&mut existing, incoming);
+            if summary.changed() || !file_exists {
+                snapshot::save(&path, &existing)?;
+                println!(
+                    "{}: {}",
+                    label_obsidian_snapshot_saved(language),
+                    path.display()
+                );
+            } else {
+                println!(
+                    "{}: {}",
+                    label_obsidian_snapshot_unchanged(language),
+                    path.display()
+                );
+            }
+        }
+    }
 
     print_warnings(language, &warnings);
 

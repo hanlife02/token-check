@@ -4,7 +4,7 @@
 
 - crates.io 包名：`ethan-tkc`
 - 安装后命令：`tkc`、`tokencheck`
-- 当前版本：`1.2.2`
+- 当前版本：`1.2.3`
 - License：MIT
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
@@ -184,7 +184,7 @@ $XDG_CONFIG_HOME/tokencheck/config.json
 | `source` | `all` | 默认数据来源。支持 `all`、`claude`、`codex`、`opencode`、`pi`、`kimi`。 |
 | `data_file` | `data/tokencheck.json` | 默认快照文件路径，也就是 `fetch` 保存和 `--from-json` 读取的位置。 |
 | `pricing_file` | 无 | 自定义价格 JSON 文件路径。输入 `none`、`null` 或 `-` 可以清空。 |
-| `obsidian_snapshot_file` | 无 | Obsidian 使用的 JSON 快照路径。`tkc obsidian --fetch` 会写入这个文件；未配置时回退到 `data_file`。 |
+| `obsidian_snapshot_file` | 无 | Obsidian 使用的 JSON 快照路径。`tkc fetch` 和 `tkc obsidian --fetch` 都会写入这个文件；未配置时回退到 `data_file`。 |
 | `obsidian_dashboard_file` | 无 | Obsidian Dashboard Markdown 文件路径。`tkc obsidian` 会创建或覆盖这个文件。 |
 | `limit` | `20` | 默认表格或排行行数。 |
 | `heatmap_months` | `12` | `heatmap` 默认展示月份数。 |
@@ -423,6 +423,8 @@ tkc summary --since 30d
 ```text
 data/tokencheck.json
 ```
+
+如果配置了 `obsidian_snapshot_file`，`fetch` 还会把同一批扫描结果合并写入该 Obsidian 快照，这样之后直接运行 `tkc obsidian` 就能看到最新数据；`tkc fetch` 不会覆盖 Dashboard 文件。
 
 示例：
 

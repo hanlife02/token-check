@@ -95,7 +95,7 @@ pub struct ToolEvent {
     pub tool: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReportData {
     #[serde(default)]
     pub sessions: Vec<SessionMeta>,
