@@ -109,12 +109,48 @@ fn collect_db(
     collect_db_messages(&connection, sessions, usage_events, seen_event_ids)
 }
 
+/// OpenCode switched from the `session`/`message` tables (schema v1) to the
+/// `session_v2`/`session_message` tables (schema v2). Detect which layout the
+/// database uses so both old and new installs are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbLayout {
+    Legacy,
+    V2,
+}
+
+fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
+    let mut statement =
+        connection.prepare("select 1 from sqlite_master where type = 'table' and name = ?1")?;
+    let mut rows = statement.query([name])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn detect_layout(connection: &Connection) -> Result<DbLayout> {
+    if table_exists(connection, "message")? {
+        Ok(DbLayout::Legacy)
+    } else if table_exists(connection, "session_message")? {
+        Ok(DbLayout::V2)
+    } else {
+        anyhow::bail!("no supported message table found (expected message or session_message)")
+    }
+}
+
 fn collect_db_sessions(
     connection: &Connection,
     sessions: &mut BTreeMap<String, SessionInfo>,
 ) -> Result<()> {
-    let mut statement = connection
-        .prepare("select id, directory, time_created from session order by time_created, id")?;
+    let table = if table_exists(connection, "session")? {
+        "session"
+    } else if table_exists(connection, "session_v2")? {
+        "session_v2"
+    } else {
+        // Without a session table the messages still carry enough context.
+        return Ok(());
+    };
+
+    let mut statement = connection.prepare(&format!(
+        "select id, directory, time_created from {table} order by time_created, id"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -138,6 +174,20 @@ fn collect_db_sessions(
 }
 
 fn collect_db_messages(
+    connection: &Connection,
+    sessions: &mut BTreeMap<String, SessionInfo>,
+    usage_events: &mut Vec<UsageEvent>,
+    seen_event_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    match detect_layout(connection)? {
+        DbLayout::Legacy => {
+            collect_legacy_db_messages(connection, sessions, usage_events, seen_event_ids)
+        }
+        DbLayout::V2 => collect_v2_db_messages(connection, sessions, usage_events, seen_event_ids),
+    }
+}
+
+fn collect_legacy_db_messages(
     connection: &Connection,
     sessions: &mut BTreeMap<String, SessionInfo>,
     usage_events: &mut Vec<UsageEvent>,
@@ -179,6 +229,62 @@ fn collect_db_messages(
                 fallback_project: row.session_directory.as_deref(),
                 fallback_event_millis: Some(row.time_updated).or(Some(row.time_created)),
                 fallback_session_millis: row.session_time_created.or(Some(row.time_created)),
+                assistant: false,
+            },
+            sessions,
+            usage_events,
+            seen_event_ids,
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_v2_db_messages(
+    connection: &Connection,
+    sessions: &mut BTreeMap<String, SessionInfo>,
+    usage_events: &mut Vec<UsageEvent>,
+    seen_event_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    let mut statement = connection.prepare(
+        "select session_message.id,
+                session_message.session_id,
+                session_message.seq,
+                session_message.time_created,
+                session_message.time_updated,
+                session_message.data,
+                session_v2.directory,
+                session_v2.time_created
+         from session_message
+         left join session_v2 on session_v2.id = session_message.session_id
+         where session_message.type = 'assistant'
+         order by session_message.time_created, session_message.seq, session_message.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(MessageRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            time_created: row.get(3)?,
+            time_updated: row.get(4)?,
+            data: row.get(5)?,
+            session_directory: row.get(6)?,
+            session_time_created: row.get(7)?,
+        })
+    })?;
+
+    for row in rows {
+        let row = row?;
+        let value: Value = serde_json::from_str(&row.data)
+            .with_context(|| format!("parse OpenCode message {}", row.id))?;
+        collect_message_value(
+            &value,
+            MessageContext {
+                event_id: row.id,
+                fallback_session_id: row.session_id,
+                fallback_project: row.session_directory.as_deref(),
+                fallback_event_millis: Some(row.time_updated).or(Some(row.time_created)),
+                fallback_session_millis: row.session_time_created.or(Some(row.time_created)),
+                assistant: true,
             },
             sessions,
             usage_events,
@@ -257,6 +363,7 @@ fn collect_message_files(
                         fallback_project: None,
                         fallback_event_millis: None,
                         fallback_session_millis: None,
+                        assistant: false,
                     },
                     sessions,
                     usage_events,
@@ -278,6 +385,9 @@ struct MessageContext<'a> {
     fallback_project: Option<&'a str>,
     fallback_event_millis: Option<i64>,
     fallback_session_millis: Option<i64>,
+    /// The database type column already tells us the message is an assistant
+    /// turn, while storage files carry the role inside the JSON payload.
+    assistant: bool,
 }
 
 fn collect_message_value(
@@ -287,7 +397,7 @@ fn collect_message_value(
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
 ) {
-    if value.get("role").and_then(Value::as_str) != Some("assistant") {
+    if !context.assistant && value.get("role").and_then(Value::as_str) != Some("assistant") {
         return;
     }
 
@@ -305,7 +415,7 @@ fn collect_message_value(
         .unwrap_or_else(|| String::from("unknown"));
     let model = model_label(
         string_at(value, &["/providerID", "/model/providerID"]).as_deref(),
-        string_at(value, &["/modelID", "/model/modelID"]).as_deref(),
+        string_at(value, &["/modelID", "/model/modelID", "/model/id"]).as_deref(),
     );
 
     upsert_session(
@@ -497,6 +607,84 @@ mod tests {
         assert_eq!(usage.output, 7_708);
         assert_eq!(usage.reasoning_output, 5);
         assert_eq!(usage.computed_total(), 110_186);
+    }
+
+    #[test]
+    fn reads_v2_sqlite_schema() {
+        let root = std::env::temp_dir().join(format!(
+            "tokencheck-opencode-v2-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let connection = Connection::open(root.join("opencode.db")).unwrap();
+        connection
+            .execute_batch(
+                "create table session_v2 (
+                    id text primary key,
+                    directory text not null,
+                    time_created integer not null
+                );
+                create table session_message (
+                    id text primary key,
+                    session_id text not null,
+                    type text not null,
+                    seq integer not null,
+                    time_created integer not null,
+                    time_updated integer not null,
+                    data text not null
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "insert into session_v2 (id, directory, time_created) values (?1, ?2, ?3)",
+                ("ses_v2", "/tmp/v2-project", 1_792_934_016_000_i64),
+            )
+            .unwrap();
+        let message = json!({
+            "time": {"created": 1_792_933_953_327_i64, "completed": 1_792_933_958_187_i64},
+            "model": {"id": "deepseek-v4-flash-0731", "providerID": "zzh"},
+            "tokens": {
+                "input": 9_353,
+                "output": 189,
+                "reasoning": 0,
+                "cache": {"read": 0, "write": 0}
+            }
+        })
+        .to_string();
+        connection
+            .execute(
+                "insert into session_message
+                 (id, session_id, type, seq, time_created, time_updated, data)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    "msg_v2",
+                    "ses_v2",
+                    "assistant",
+                    6_i64,
+                    1_792_933_953_327_i64,
+                    1_792_933_958_187_i64,
+                    message,
+                ),
+            )
+            .unwrap();
+        drop(connection);
+
+        let data = collect(&root).unwrap();
+
+        assert!(data.warnings.is_empty(), "{:?}", data.warnings);
+        assert_eq!(data.sessions.len(), 1);
+        assert_eq!(data.sessions[0].project, "/tmp/v2-project");
+        assert_eq!(data.usage_events.len(), 1);
+        let event = &data.usage_events[0];
+        assert_eq!(event.session_id, "ses_v2");
+        assert_eq!(event.project, "/tmp/v2-project");
+        assert_eq!(event.model, "zzh/deepseek-v4-flash-0731");
+        assert_eq!(event.usage.computed_total(), 9_542);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
