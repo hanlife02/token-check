@@ -109,15 +109,9 @@ fn collect_db(
     collect_db_messages(&connection, sessions, usage_events, seen_event_ids)
 }
 
-/// OpenCode switched from the `session`/`message` tables (schema v1) to the
-/// `session_v2`/`session_message` tables (schema v2). Detect which layout the
-/// database uses so both old and new installs are read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbLayout {
-    Legacy,
-    V2,
-}
-
+/// OpenCode V1 stores messages in the `session`/`message` tables, V2 in the
+/// `session_v2`/`session_message` tables. Read every layout present so both
+/// versions and databases that kept migrated V1 rows are supported.
 fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
     let mut statement =
         connection.prepare("select 1 from sqlite_master where type = 'table' and name = ?1")?;
@@ -125,49 +119,35 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
     Ok(rows.next()?.is_some())
 }
 
-fn detect_layout(connection: &Connection) -> Result<DbLayout> {
-    if table_exists(connection, "message")? {
-        Ok(DbLayout::Legacy)
-    } else if table_exists(connection, "session_message")? {
-        Ok(DbLayout::V2)
-    } else {
-        anyhow::bail!("no supported message table found (expected message or session_message)")
-    }
-}
-
 fn collect_db_sessions(
     connection: &Connection,
     sessions: &mut BTreeMap<String, SessionInfo>,
 ) -> Result<()> {
-    let table = if table_exists(connection, "session")? {
-        "session"
-    } else if table_exists(connection, "session_v2")? {
-        "session_v2"
-    } else {
-        // Without a session table the messages still carry enough context.
-        return Ok(());
-    };
+    for table in ["session", "session_v2"] {
+        if !table_exists(connection, table)? {
+            continue;
+        }
+        let mut statement = connection.prepare(&format!(
+            "select id, directory, time_created from {table} order by time_created, id"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
 
-    let mut statement = connection.prepare(&format!(
-        "select id, directory, time_created from {table} order by time_created, id"
-    ))?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-
-    for row in rows {
-        let (session_id, directory, time_created) = row?;
-        upsert_session(
-            sessions,
-            &session_id,
-            Some(date_from_millis(time_created)),
-            Some(non_empty_or_unknown(&directory)),
-            None,
-        );
+        for row in rows {
+            let (session_id, directory, time_created) = row?;
+            upsert_session(
+                sessions,
+                &session_id,
+                Some(date_from_millis(time_created)),
+                Some(non_empty_or_unknown(&directory)),
+                None,
+            );
+        }
     }
 
     Ok(())
@@ -179,12 +159,18 @@ fn collect_db_messages(
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
-    match detect_layout(connection)? {
-        DbLayout::Legacy => {
-            collect_legacy_db_messages(connection, sessions, usage_events, seen_event_ids)
-        }
-        DbLayout::V2 => collect_v2_db_messages(connection, sessions, usage_events, seen_event_ids),
+    let legacy = table_exists(connection, "message")?;
+    let v2 = table_exists(connection, "session_message")?;
+    if !legacy && !v2 {
+        anyhow::bail!("no supported message table found (expected message or session_message)");
     }
+    if legacy {
+        collect_legacy_db_messages(connection, sessions, usage_events, seen_event_ids)?;
+    }
+    if v2 {
+        collect_v2_db_messages(connection, sessions, usage_events, seen_event_ids)?;
+    }
+    Ok(())
 }
 
 fn collect_legacy_db_messages(
@@ -193,18 +179,27 @@ fn collect_legacy_db_messages(
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
-    let mut statement = connection.prepare(
+    let (join, directory, session_created) = if table_exists(connection, "session")? {
+        (
+            "left join session on session.id = message.session_id",
+            "session.directory",
+            "session.time_created",
+        )
+    } else {
+        ("", "null", "null")
+    };
+    let mut statement = connection.prepare(&format!(
         "select message.id,
                 message.session_id,
                 message.time_created,
                 message.time_updated,
                 message.data,
-                session.directory,
-                session.time_created
+                {directory},
+                {session_created}
          from message
-         left join session on session.id = message.session_id
-         order by message.time_created, message.id",
-    )?;
+         {join}
+         order by message.time_created, message.id"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok(MessageRow {
             id: row.get(0)?,
@@ -246,20 +241,29 @@ fn collect_v2_db_messages(
     usage_events: &mut Vec<UsageEvent>,
     seen_event_ids: &mut BTreeSet<String>,
 ) -> Result<()> {
-    let mut statement = connection.prepare(
+    let (join, directory, session_created) = if table_exists(connection, "session_v2")? {
+        (
+            "left join session_v2 on session_v2.id = session_message.session_id",
+            "session_v2.directory",
+            "session_v2.time_created",
+        )
+    } else {
+        ("", "null", "null")
+    };
+    let mut statement = connection.prepare(&format!(
         "select session_message.id,
                 session_message.session_id,
                 session_message.seq,
                 session_message.time_created,
                 session_message.time_updated,
                 session_message.data,
-                session_v2.directory,
-                session_v2.time_created
+                {directory},
+                {session_created}
          from session_message
-         left join session_v2 on session_v2.id = session_message.session_id
+         {join}
          where session_message.type = 'assistant'
-         order by session_message.time_created, session_message.seq, session_message.id",
-    )?;
+         order by session_message.time_created, session_message.seq, session_message.id"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok(MessageRow {
             id: row.get(0)?,
@@ -683,6 +687,140 @@ mod tests {
         assert_eq!(event.project, "/tmp/v2-project");
         assert_eq!(event.model, "zzh/deepseek-v4-flash-0731");
         assert_eq!(event.usage.computed_total(), 9_542);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_both_v1_and_v2_tables_in_one_database() {
+        let root = std::env::temp_dir().join(format!(
+            "tokencheck-opencode-mixed-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let connection = Connection::open(root.join("opencode.db")).unwrap();
+        connection
+            .execute_batch(
+                "create table session (
+                    id text primary key,
+                    directory text not null,
+                    time_created integer not null
+                );
+                create table message (
+                    id text primary key,
+                    session_id text not null,
+                    time_created integer not null,
+                    time_updated integer not null,
+                    data text not null
+                );
+                create table session_v2 (
+                    id text primary key,
+                    directory text not null,
+                    time_created integer not null
+                );
+                create table session_message (
+                    id text primary key,
+                    session_id text not null,
+                    type text not null,
+                    seq integer not null,
+                    time_created integer not null,
+                    time_updated integer not null,
+                    data text not null
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "insert into session (id, directory, time_created) values ('ses_v1', '/tmp/v1', 1_771_094_670_993)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "insert into session_v2 (id, directory, time_created) values ('ses_v2', '/tmp/v2', 1_771_094_670_993)",
+                [],
+            )
+            .unwrap();
+
+        let v1_message = json!({
+            "role": "assistant",
+            "time": {"created": 1_771_094_671_004_i64, "completed": 1_771_094_673_209_i64},
+            "model": {"providerID": "anthropic", "modelID": "claude-opus-4-6"},
+            "tokens": {"input": 100, "output": 10, "cache": {"read": 5, "write": 0}}
+        })
+        .to_string();
+        let v2_message = json!({
+            "time": {"created": 1_792_933_953_327_i64, "completed": 1_792_933_958_187_i64},
+            "model": {"id": "deepseek-v4-flash-0731", "providerID": "zzh"},
+            "tokens": {"input": 9_353, "output": 189, "cache": {"read": 0, "write": 0}}
+        })
+        .to_string();
+
+        for (id, session, message) in [
+            ("msg_v1", "ses_v1", &v1_message),
+            ("msg_both", "ses_v1", &v1_message),
+            ("msg_both", "ses_v2", &v2_message),
+            ("msg_v2", "ses_v2", &v2_message),
+        ] {
+            let table = if session == "ses_v1" {
+                "message"
+            } else {
+                "session_message"
+            };
+            let type_column = if table == "session_message" {
+                ", type"
+            } else {
+                ""
+            };
+            let type_value = if table == "session_message" {
+                ", 'assistant'"
+            } else {
+                ""
+            };
+            let seq_column = if table == "session_message" {
+                ", seq"
+            } else {
+                ""
+            };
+            let seq_value = if table == "session_message" {
+                ", 1"
+            } else {
+                ""
+            };
+            connection
+                .execute(
+                    &format!(
+                        "insert into {table}
+                         (id, session_id, time_created, time_updated, data{type_column}{seq_column})
+                         values (?1, ?2, 1, 1, ?3{type_value}{seq_value})"
+                    ),
+                    (id, session, message),
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let data = collect(&root).unwrap();
+
+        assert!(data.warnings.is_empty(), "{:?}", data.warnings);
+        assert_eq!(data.usage_events.len(), 3);
+        assert!(data
+            .usage_events
+            .iter()
+            .any(|event| event.model == "anthropic/claude-opus-4-6"));
+        assert!(data
+            .usage_events
+            .iter()
+            .any(|event| event.model == "zzh/deepseek-v4-flash-0731"));
+        assert_eq!(
+            data.usage_events
+                .iter()
+                .map(|event| event.usage.computed_total())
+                .sum::<u64>(),
+            115 * 2 + 9_542
+        );
 
         let _ = fs::remove_dir_all(root);
     }

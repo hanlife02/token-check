@@ -4,7 +4,7 @@
 
 - crates.io 包名：`ethan-tkc`
 - 安装后命令：`tkc`、`tokencheck`
-- 当前版本：`1.2.0`
+- 当前版本：`1.2.2`
 - License：MIT
 
 当前版本优先读取本地日志和会话文件，只统计结构化元数据、token usage 和工具名；默认不会展示 prompt、回复正文、shell 命令参数、工具参数或文件快照内容。
@@ -657,6 +657,8 @@ OpenCode：
 ~/.local/share/opencode/storage/message/**/*.json
 ~/.local/share/opencode/storage/session/**/*.json
 ```
+
+OpenCode V1 使用 `session`/`message` 表和 `storage/` JSON 文件，V2 使用 `session_v2`/`session_message` 表；`tkc` 会自动识别并同时读取两种结构。
 
 Pi：
 
